@@ -8,15 +8,39 @@ var damage_labels: Array[Dictionary] = []
 var impact_shake := 0.0
 var muzzle_time := 0.0
 var reduced_fx := false
+# Freeze-frame left on the battle simulation after a heavy blow.
+var hitstop := 0.0
+var hitstop_ready_at := 0.0
+# 1 on every combo hit, decays to 0; drives the combo counter's pop.
+var combo_pop := 0.0
+# Full-screen white flash after the boss falls.
+var screen_flash := 0.0
 
 func reset_fx() -> void:
 	effects.clear()
 	damage_labels.clear()
 	impact_shake = 0
 	muzzle_time = 0
+	hitstop = 0
+	hitstop_ready_at = 0
+	combo_pop = 0
+	screen_flash = 0
+
+func freeze_frame(duration: float, now: float) -> void:
+	# Rate-limited so dense fights never turn into a stutter.
+	if reduced_fx or now < hitstop_ready_at:
+		return
+	hitstop = maxf(hitstop, duration)
+	hitstop_ready_at = now + duration + 0.25
+
+func buzz(milliseconds: int) -> void:
+	if not reduced_fx and OS.has_feature("mobile"):
+		Input.vibrate_handheld(milliseconds)
 
 func tick_fx(delta: float) -> void:
-	impact_shake = move_toward(impact_shake, 0, delta * 18)
+	combo_pop = move_toward(combo_pop, 0, delta * 6)
+	screen_flash = move_toward(screen_flash, 0, delta * 3)
+	impact_shake = move_toward(impact_shake, 0, delta * 24)
 	muzzle_time = move_toward(muzzle_time, 0, delta)
 	for i in range(effects.size() - 1, -1, -1):
 		effects[i].age += delta
@@ -50,13 +74,22 @@ func hit_label(enemy: Dictionary, damage: int, color: Color, heavy: bool) -> voi
 
 func draw_damage_labels(world: Transform2D) -> void:
 	for label in damage_labels:
-		var pos: Vector2 = label.pos + Vector2((int(label.id) % 3 - 1) * 10, -15 - label.age * 82)
+		var age: float = label.age
+		var rise := 1.0 - pow(1.0 - minf(age / 0.36, 1.0), 3)
+		var pos: Vector2 = label.pos + Vector2((int(label.id) % 3 - 1) * 10, -15 - rise * 34)
 		pos.y = maxf(158, pos.y)
 		pos = world * pos
-		var opacity := clampf((0.51 - float(label.age)) * 8, 0, 1)
-		var size := 17 if label.heavy else 13
-		words(str(label.damage), pos + Vector2(1, 2), size, Color(INK, opacity), true)
-		words(str(label.damage), pos, size, Color(label.color, opacity), true)
+		if label.heavy and age < 0.16 and not reduced_fx:
+			pos.x += roundf(sin(age * 120) * 3)
+		var opacity := clampf((0.51 - age) * 8, 0, 1)
+		var pop := maxf(0.0, 1.0 - age / 0.09)
+		var size := roundi((22.0 if label.heavy else 15.0) * (1.0 + pop * (0.7 if label.heavy else 0.4)))
+		var text := str(label.damage) + ("!" if label.heavy else "")
+		var outline := Color(INK, opacity)
+		for offset in [Vector2(-2, 0), Vector2(2, 0), Vector2(0, -2), Vector2(0, 3)]:
+			words(text, pos + offset, size, outline, true)
+		var face: Color = Color.WHITE.lerp(label.color, 0.25) if pop > 0.5 else label.color
+		words(text, pos, size, Color(face, opacity), true)
 
 func draw_combat_effect(effect: Dictionary) -> void:
 	var origin: Vector2 = effect.pos

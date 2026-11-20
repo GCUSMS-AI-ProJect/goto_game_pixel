@@ -31,6 +31,9 @@ const ELITE_ARRIVAL := 73.0
 const BOSS_ARRIVAL := 149.0
 const BOSS_HEALTH := 1100
 const ENTRY_SPEED := 128.0
+const VICTORY_SLOWMO := 1.1
+const SLOWMO_RATE := 0.3
+const SCRAP_CHIME_GAP := 0.5
 const WAVES = [
 	[SEARCH_INTRO, "oo..oo..", "..o...o."],
 	[12.0, "o..oo..o", ".o.rr.o."],
@@ -153,6 +156,9 @@ var last_salt_reward := 0
 var upgrade_points := 0
 var selected_upgrade := -1
 var result_time := 0.0
+var victory_time := 0.0
+var scrap_streak := 0
+var scrap_chime_time := 0.0
 var enemies: Array[Dictionary] = []
 var balls: Array[Dictionary] = []
 var hazards: Array[Dictionary] = []
@@ -375,6 +381,9 @@ func start_run() -> void:
 	balls.clear()
 	hazards.clear()
 	pickups.clear()
+	victory_time = 0.0
+	scrap_streak = 0
+	scrap_chime_time = 0.0
 	reset_fx()
 	clear_drag()
 	mode = "fight"
@@ -713,11 +722,24 @@ func _physics_process(delta: float) -> void:
 		if safe_area_poll <= 0:
 			refresh_layout()
 			safe_area_poll = 0.25
+	var fx_rate := 1.0
+	if mode == "fight" and victory_time > 0:
+		fx_rate = SLOWMO_RATE
+	elif mode == "fight" and hitstop > 0:
+		fx_rate = 0.15
 	if mode in ["fight", "win", "loss"]:
-		tick_fx(delta)
+		tick_fx(delta * fx_rate)
 	if mode in ["win", "loss"]:
 		result_time += delta
-	if mode == "fight":
+	if mode == "fight" and victory_time > 0:
+		victory_time -= delta
+		update_balls(delta * SLOWMO_RATE)
+		if victory_time <= 0:
+			victory_time = 0.0
+			finish(true)
+	elif mode == "fight" and hitstop > 0:
+		hitstop = maxf(0, hitstop - delta)
+	elif mode == "fight":
 		tick_battle(delta)
 		for index in range(control_feedback.size()):
 			control_feedback[index] = maxf(0, control_feedback[index] - delta)
@@ -864,7 +886,7 @@ func update_enemies(delta: float) -> void:
 		var enemy := enemies[i]
 		enemy.slow = maxf(0, enemy.slow - delta)
 		enemy.flash = maxf(0, enemy.flash - delta)
-		enemy.recoil = enemy.recoil.move_toward(Vector2.ZERO, 40 * delta)
+		enemy.recoil = enemy.recoil.move_toward(Vector2.ZERO, 90 * delta)
 		var slow_factor := 0.48 if enemy.slow > 0 else 1.0
 		if enemy.entry != Vector2.ZERO:
 			enemy.pos = enemy.pos.move_toward(enemy.entry, ENTRY_SPEED * delta * slow_factor)
@@ -920,8 +942,10 @@ func hurt(amount: int, breach: bool) -> void:
 	hp = maxi(0, hp - amount)
 	armor_time = 0.8
 	emit_fx("break", pilot, CORAL, 0.32, 42)
-	kick_impact(3.8)
+	kick_impact(5.5)
 	sound.play_cue("hurt")
+	sound.play_cue("thump", 0.75)
+	buzz(40)
 
 func update_hazards(delta: float) -> void:
 	for i in range(hazards.size() - 1, -1, -1):
@@ -1067,6 +1091,8 @@ func connect_ball(ball: Dictionary, from: Vector2) -> void:
 		ball.trail.append(contact_point)
 	var bonus: bool = ball.banks > 0 or ball.charged
 	var power := roundi(ball.power * (1 + ball.banks * 0.18))
+	if ball.charged:
+		freeze_frame(0.045, elapsed)
 	ball_hit(target, ball.kind, power, contact_point, direction, bonus)
 
 func ball_hit(enemy: Dictionary, kind: int, power: int, contact: Vector2,
@@ -1076,9 +1102,14 @@ func ball_hit(enemy: Dictionary, kind: int, power: int, contact: Vector2,
 	var fused := kind >= BASE_BALLS
 	var heavy := bonus or fused
 	var freeze := kind in [1, 4, 5, 8]
-	enemy.recoil = direction * (6 if heavy else 3)
+	enemy.recoil = direction * (13 if heavy else 7)
 	emit_fx("hit", contact, color, 0.22, 46 if heavy else 29, -direction)
-	play_impact(4, 1 + minf(combo_hits, 18) * 0.009)
+	# Each step of the chain raises the hit a semitone, capped at an octave.
+	play_impact(4, pow(2.0, mini(12, floori(combo_hits / 3.0)) / 12.0))
+	if heavy:
+		sound.play_cue("thump", 1.15)
+	if bonus and kind < 0 and power >= 20:
+		kick_impact(1.6)
 	if freeze:
 		enemy.slow = 2.6
 		if fused or enemy.flash <= 0:
@@ -1115,13 +1146,14 @@ func ball_hit(enemy: Dictionary, kind: int, power: int, contact: Vector2,
 				break
 
 func damage_enemy(enemy: Dictionary, power: int, color: Color = CREAM, heavy: bool = false) -> void:
-	if mode != "fight" or enemy.hp <= 0:
+	if mode != "fight" or enemy.hp <= 0 or victory_time > 0:
 		return
 	enemy.hp -= power
 	enemy.flash = 0.11
 	hit_label(enemy, power, color, heavy)
 	combo_hits += 1
 	combo_time = CHAIN_WINDOW
+	combo_pop = 1.0
 	best_combo = maxi(combo_hits, best_combo)
 	if combo_hits % SURGE_HITS == 0:
 		surge_ready = true
@@ -1130,30 +1162,69 @@ func damage_enemy(enemy: Dictionary, power: int, color: Color = CREAM, heavy: bo
 		return
 	enemies.erase(enemy)
 	kills += 1
-	emit_fx("break", enemy.pos, enemy_tint(enemy.kind), 0.54 if enemy.kind >= 3 else 0.32,
-		100 if enemy.kind == 3 else 50 if enemy.kind == 4 else 32)
+	emit_fx("break", enemy.pos, enemy_tint(enemy.kind), 0.54 if enemy.kind >= 3 else 0.36,
+		120 if enemy.kind == 3 else 64 if enemy.kind == 4 else 44)
+	emit_fx("hit", enemy.pos, CREAM, 0.16, 52, Vector2.UP)
+	sound.play_cue("thump", 0.9 if enemy.kind >= 2 else 1.0)
 	if enemy.kind == 3:
-		kick_impact(5.0)
-		play_impact(5)
-		finish(true)
+		begin_victory(enemy.pos)
 		return
 	earned += [1, 1, 3, 0, 6][enemy.kind]
 	if enemy.kind == 4:
-		kick_impact(4)
+		kick_impact(6)
 		play_impact(5)
-	pickups.append({"pos": enemy.pos, "value": [2, 2, 5, 0, 7][enemy.kind], "age": 0.0})
+		freeze_frame(0.08, elapsed)
+		buzz(35)
+	else:
+		kick_impact(1.4)
+	drop_scrap(enemy.pos, [2, 2, 5, 0, 7][enemy.kind])
+
+# Splits a reward into a few pieces that burst outward, then home in on the ship.
+func drop_scrap(origin: Vector2, value: int) -> void:
+	var pieces := mini(value, 3)
+	for index in range(pieces):
+		var share := floori(float(value) / pieces) + (1 if index < value % pieces else 0)
+		var burst := Vector2.from_angle(rng.randf_range(0, TAU)) * rng.randf_range(110, 210)
+		pickups.append({"pos": origin, "vel": burst, "value": share, "age": 0.0})
+
+# Boss down: clear the field, flash, slow time, then show the result.
+func begin_victory(origin: Vector2) -> void:
+	for other in enemies:
+		emit_fx("break", other.pos, enemy_tint(other.kind), 0.5, 48)
+	enemies.clear()
+	hazards.clear()
+	emit_fx("blast", origin, GOLD, 0.8, 180)
+	emit_fx("surge", origin, CREAM, 0.6, 120)
+	kick_impact(9.0)
+	play_impact(5)
+	screen_flash = 0.45
+	victory_time = VICTORY_SLOWMO
+	buzz(120)
 
 func update_pickups(delta: float) -> void:
+	scrap_chime_time = maxf(0, scrap_chime_time - delta)
+	if scrap_chime_time <= 0:
+		scrap_streak = 0
 	for index in range(pickups.size() - 1, -1, -1):
 		var item := pickups[index]
 		item.age += delta
-		item.pos.y += 68 * delta
-		var distance := pilot.distance_to(item.pos)
-		if distance < 92 or item.age > 3.3:
-			item.pos = item.pos.move_toward(pilot, 375 * delta)
-		if item.pos.distance_to(pilot) < 17:
+		if item.age < 0.22:
+			# Burst outward first, braking hard.
+			item.pos += item.vel * delta
+			item.vel = item.vel.move_toward(Vector2.ZERO, 900 * delta)
+		else:
+			# Then the ship pulls every piece in, faster the longer it flies.
+			var pull: float = 260.0 + 1500.0 * (item.age - 0.22)
+			item.pos = item.pos.move_toward(pilot, pull * delta)
+		item.pos = item.pos.clamp(ARENA.position, ARENA.end)
+		if item.age > 0.22 and item.pos.distance_to(pilot) < 17:
 			xp += item.value
-			emit_fx("pickup", item.pos, MINT if item.value < 5 else GOLD, 0.24, 18, item.pos.direction_to(pilot))
+			emit_fx("pickup", item.pos, MINT if item.value < 3 else GOLD, 0.24, 18, item.pos.direction_to(pilot))
+			# Pickups in quick succession climb a major scale.
+			var step: int = [0, 2, 4, 5, 7, 9, 11, 12][mini(scrap_streak, 7)]
+			sound.play_cue("coin", pow(2.0, step / 12.0))
+			scrap_streak += 1
+			scrap_chime_time = SCRAP_CHIME_GAP
 			pickups.remove_at(index)
 
 func xp_needed() -> int:
@@ -1336,6 +1407,8 @@ func _draw() -> void:
 		draw_rect(Rect2(muzzle - size / 2, size), Color(GOLD, muzzle_time / 0.105))
 	draw_set_transform(Vector2.ZERO)
 	draw_damage_labels(world)
+	if screen_flash > 0:
+		draw_rect(battle_layout.arena, Color(1, 1, 1, minf(0.85, screen_flash * 2)))
 	mask_arena()
 	draw_battle_hud(boss_hp)
 	draw_battle_controls()
@@ -1425,12 +1498,18 @@ func draw_combo(hud: Rect2, right: float) -> void:
 	if opacity <= 0:
 		return
 	var accent := combo_emphasis > 0
-	var color := Color(GOLD if accent else MINT, opacity)
+	# Colour climbs every 10 hits so long chains look different at a glance.
+	var tiers := [MINT, SKY, GOLD, PEACH, CORAL]
+	var tier: Color = tiers[mini(floori(combo_hits / 10.0), tiers.size() - 1)]
+	var color := Color(GOLD if accent else tier, opacity)
 	var center := Vector2(right - 52, hud.position.y + 49 - minf(7, age * 12))
 	if accent:
 		draw_rect(Rect2(center + Vector2(-45, -12), Vector2(4, 4)), color)
 		draw_rect(Rect2(center + Vector2(41, -12), Vector2(4, 4)), color)
-	words("%d 连击" % combo_hits, center, 20 if accent else 17, color, true)
+	var size := roundi((20.0 if accent else 17.0) * (1.0 + combo_pop * 0.3) + minf(6, combo_hits / 10.0))
+	var text := "%d 连击" % combo_hits
+	words(text, center + Vector2(1, 2), size, Color(INK, opacity), true)
+	words(text, center, size, color, true)
 
 func draw_course() -> void:
 	for lane in range(7):

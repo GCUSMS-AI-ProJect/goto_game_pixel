@@ -155,6 +155,9 @@ func draw_enemy(enemy: Dictionary, sector: int, time: float) -> void:
 	if enemy.slow > 0:
 		draw_rect(Rect2(pos - Vector2(17, 15) * size / 3.0, Vector2(34, 30) * size / 3.0), Color(SKY, 0.17))
 	pixel_sprite(sprite, pos, size, tint, stretch)
+	if enemy.flash > 0.04:
+		# Modulate above 1 pushes every lit texel to white: a one-beat hit silhouette.
+		pixel_sprite(sprite, pos, size, Color(6, 6, 6, 0.9), stretch)
 	if kind != 3 and enemy.hp < enemy.max_hp:
 		var bar_width := 38 if kind == 4 else 28
 		gauge(Rect2(pos.x - bar_width / 2.0, pos.y - size * 5 - 5, bar_width, 3),

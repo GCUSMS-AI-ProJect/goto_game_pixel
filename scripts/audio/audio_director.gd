@@ -23,7 +23,13 @@ const CUES = {
 	"alert": [preload("res://assets/audio/sfx/alert.wav"), -11.0, 0.33],
 	"departure": [preload("res://assets/audio/sfx/departure.wav"), -16.0, 0.85],
 	"contact": [preload("res://assets/audio/sfx/contact.wav"), -14.0, 2.0],
+	"thump": [preload("res://assets/audio/sfx/thump.wav"), -12.0, 0.06],
+	"coin": [preload("res://assets/audio/sfx/coin.wav"), -21.0, 0.035],
 }
+# Cues that may overlap themselves, up to this many voices at once.
+const POLYPHONIC := {"hit": 3, "thump": 3, "coin": 3}
+# Cues that get a small random pitch and level change on every play.
+const VARIED := ["hit", "thump", "coin", "rail", "ice", "arc", "blast", "hurt"]
 
 var music_level := 0.7
 var effects_level := 0.8
@@ -53,6 +59,7 @@ func _ready() -> void:
 	for name in CUES:
 		var voice := AudioStreamPlayer.new()
 		voice.stream = CUES[name][0]
+		voice.max_polyphony = POLYPHONIC.get(name, 1)
 		add_child(voice)
 		voices[name] = voice
 
@@ -80,7 +87,9 @@ func play_cue(name: String, pitch: float = 1.0) -> void:
 		return
 	var cue: Array = CUES[name]
 	var voice: AudioStreamPlayer = voices.get(name)
-	if voice == null or voice.playing or clock - float(last_played.get(name, -2.0)) < cue[2]:
+	if voice == null or clock - float(last_played.get(name, -2.0)) < cue[2]:
+		return
+	if voice.playing and not POLYPHONIC.has(name):
 		return
 	if name in ["hit", "rail", "ice", "arc"] and clock - priority_time < 0.15:
 		return
@@ -94,6 +103,10 @@ func play_cue(name: String, pitch: float = 1.0) -> void:
 		priority_time = clock
 		duck_until = clock + 0.28
 	last_played[name] = clock
+	var level_offset := 0.0
+	if name in VARIED:
+		pitch *= randf_range(0.92, 1.08)
+		level_offset = randf_range(-2.0, 2.0)
 	voice.pitch_scale = pitch
-	voice.volume_db = cue[1] + linear_to_db(effects_level)
+	voice.volume_db = cue[1] + level_offset + linear_to_db(effects_level)
 	voice.play()
