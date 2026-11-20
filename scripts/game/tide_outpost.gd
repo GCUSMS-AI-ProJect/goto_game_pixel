@@ -14,35 +14,38 @@ const HOME_SETTINGS = Rect2(390, 57, 54, 51)
 const HOME_RECENTER := Rect2(390, 117, 54, 46)
 const HOME_PORT = Rect2(36, 654, 171, 65)
 const HOME_SHIP = Rect2(219, 654, 225, 65)
-const UPGRADE_CONFIRM := Rect2(232, 634, 208, 51)
-const UPGRADE_CLOSE := Rect2(40, 634, 178, 51)
 const AUDIO_DONE = Rect2(49, 561, 382, 56)
 const DRAG_THRESHOLD := 12.0
 const NO_POINTER := -2
 const ANDROID_GESTURE_MARGIN := 36.0
 const CHAIN_WINDOW = 1.45
 const SURGE_HITS = 8
-const SEARCH_INTRO := 2.8
+const SEARCH_INTRO := 0.6
 const COMBAT_TAIL := 2.0
 const DOCK_EXIT := Rect2(36, 758, 408, 55)
-const BATCH_SIZE := 3
-const BATCH_INTERVAL := 2.2
-const ELITE_ARRIVAL := 73.0
-const BOSS_ARRIVAL := 149.0
-const BOSS_HEALTH := 1100
+const BATCH_SIZE := 4
+const BATCH_INTERVAL := 1.3
+const ELITE_ARRIVAL := 52.0
+const BOSS_ARRIVAL := 118.0
+const BOSS_HEALTH := 900
+# Small enemies trickle in between waves so the screen is never empty.
+const SWARM_INTERVAL := 1.6
+const MAX_ENEMIES := 32
+# Battle speed while the upgrade cards are open.
+const LEVEL_SLOWMO := 0.2
 const ENTRY_SPEED := 128.0
 const VICTORY_SLOWMO := 1.1
 const SLOWMO_RATE := 0.3
 const SCRAP_CHIME_GAP := 0.5
 const WAVES = [
-	[SEARCH_INTRO, "oo..oo..", "..o...o."],
-	[12.0, "o..oo..o", ".o.rr.o."],
-	[26.0, "..s..s..", "or....ro", ".oo..oo."],
-	[43.0, "o.roor.o", ".s....s.", "..o..o.."],
-	[60.0, "rr..oos.", "oo.r..sr", "..oo..oo"],
-	[80.0, "s.oooo.s", ".ro..or.", "r..ss..r"],
-	[102.0, "os..o..s", "rr.oo.rr", "..s..s.."],
-	[126.0, "sro..ors", "or.s..ro", "r..oo..r"],
+	[SEARCH_INTRO, "oo.oo.oo", "..o..o.."],
+	[8.0, "o.oooo.o", ".o.rr.o."],
+	[17.0, "..s..s..", "oroooro.", ".oo..oo."],
+	[28.0, "o.roor.o", ".s....s.", "oo.oo.oo"],
+	[40.0, "rr.ooos.", "oo.r..sr", "o.oo.oo."],
+	[56.0, "s.oooo.s", ".ro..or.", "r.oss.or"],
+	[74.0, "os.oo..s", "rr.oo.rr", "o.s..s.o"],
+	[94.0, "sro..ors", "or.s..ro", "rooooo.r"],
 ]
 const CHOICES = [
 	["灼浪", "命中引发小范围爆炸", PEACH],
@@ -154,9 +157,9 @@ var next_id := 0
 var last_reward := 0
 var last_salt_reward := 0
 var upgrade_points := 0
-var selected_upgrade := -1
 var result_time := 0.0
 var victory_time := 0.0
+var swarm_clock := 0.0
 var scrap_streak := 0
 var scrap_chime_time := 0.0
 var enemies: Array[Dictionary] = []
@@ -341,7 +344,6 @@ func start_run() -> void:
 	xp = 0
 	level = 1
 	upgrade_points = 0
-	selected_upgrade = -1
 	options.clear()
 	kills = 0
 	earned = 0
@@ -382,6 +384,7 @@ func start_run() -> void:
 	hazards.clear()
 	pickups.clear()
 	victory_time = 0.0
+	swarm_clock = 2.5
 	scrap_streak = 0
 	scrap_chime_time = 0.0
 	reset_fx()
@@ -401,7 +404,7 @@ func clear_drag() -> void:
 
 func _notification(what: int) -> void:
 	if what == NOTIFICATION_APPLICATION_FOCUS_OUT:
-		if mode == "fight":
+		if mode in ["fight", "level"]:
 			mode = "pause"
 		clear_drag()
 
@@ -427,10 +430,12 @@ func _input(event: InputEvent) -> void:
 					mode = "home"
 				elif mode == "home" and ship_drawer:
 					ship_drawer = false
-				elif mode == "level":
-					close_upgrades()
-				else:
+				elif mode != "level":
 					toggle_pause()
+			KEY_1, KEY_2, KEY_3:
+				var pick: int = event.keycode - KEY_1
+				if mode == "level" and pick < options.size():
+					choose(options[pick])
 			KEY_ENTER:
 				if mode == "home":
 					start_run()
@@ -572,16 +577,9 @@ func press(point: Vector2) -> bool:
 					if facility_rect(kind).has_point(point):
 						improve_facility(kind)
 		"level":
-			var local := point - battle_layout.dialog_origin
-			if UPGRADE_CLOSE.has_point(local):
-				close_upgrades()
-				return true
-			if UPGRADE_CONFIRM.has_point(local):
-				choose(selected_upgrade)
-				return true
 			for i in range(options.size()):
 				if choice_rect(i).has_point(point):
-					selected_upgrade = options[i]
+					choose(options[i])
 					break
 		"pause":
 			point -= battle_layout.dialog_origin
@@ -727,8 +725,12 @@ func _physics_process(delta: float) -> void:
 		fx_rate = SLOWMO_RATE
 	elif mode == "fight" and hitstop > 0:
 		fx_rate = 0.15
-	if mode in ["fight", "win", "loss"]:
+	elif mode == "level":
+		fx_rate = LEVEL_SLOWMO
+	if mode in ["fight", "level", "win", "loss"]:
 		tick_fx(delta * fx_rate)
+	if mode == "level":
+		tick_battle(delta * LEVEL_SLOWMO)
 	if mode in ["win", "loss"]:
 		result_time += delta
 	if mode == "fight" and victory_time > 0:
@@ -801,10 +803,12 @@ func tick_battle(delta: float) -> void:
 		volley()
 		shot_clock = maxf(0.32, 0.74 - haste * 0.07 - pilot_type * 0.08)
 	update_balls(delta)
-	if mode != "fight":
+	if not battle_live():
 		return
 	update_pickups(delta)
 	bank_upgrade_points()
+	if upgrade_points > 0 and mode == "fight":
+		open_level()
 
 func update_spawns(delta: float) -> void:
 	if wave < WAVES.size() and elapsed >= next_wave_at() and next_batch >= wave_batches.size():
@@ -818,6 +822,11 @@ func update_spawns(delta: float) -> void:
 		send_batch(wave_batches[next_batch], (wave + next_batch) % 2 == 0)
 		next_batch += 1
 		batch_arrival = elapsed + BATCH_INTERVAL
+	if not boss_spawned:
+		swarm_clock -= delta
+		if swarm_clock <= 0:
+			swarm_clock = SWARM_INTERVAL - minf(0.7, elapsed / 160.0)
+			send_swarm()
 	if elapsed >= ELITE_ARRIVAL and not elite_spawned:
 		elite_spawned = true
 		send_batch([Vector3i(4, 0, 0)], false)
@@ -833,6 +842,18 @@ func update_spawns(delta: float) -> void:
 			reinforcement_time = 6.0
 			send_batch([Vector3i(0, 1, 0), Vector3i(0, 6, 0)], reinforcement_side)
 			reinforcement_side = not reinforcement_side
+
+func send_swarm() -> void:
+	if enemies.size() >= MAX_ENEMIES:
+		return
+	var x := rng.randf_range(70, 410)
+	var kind := 1 if rng.randf() < 0.4 else 0
+	for index in range(3):
+		var destination := Vector2(clampf(x + (index - 1) * 34, 50, 430), 165 + rng.randf_range(0, 70))
+		spawn_enemy(kind, Vector2(destination.x, ARENA.position.y - 24 - index * 16), destination)
+
+func battle_live() -> bool:
+	return mode in ["fight", "level"]
 
 func next_wave_at() -> float:
 	return WAVES[wave][0] if wave < WAVES.size() else BOSS_ARRIVAL
@@ -869,7 +890,7 @@ func send_batch(batch: Array, from_left: bool) -> void:
 		spawn_enemy(member.x, start, destination)
 
 func spawn_enemy(kind: int, position: Vector2, entry := Vector2.ZERO) -> void:
-	var capacity: int = [16, 10, 37, BOSS_HEALTH, 185][kind]
+	var capacity: int = [9, 6, 24, BOSS_HEALTH, 150][kind]
 	if kind < 3:
 		capacity += maxi(wave - 1, 0)
 	capacity = roundi(capacity * (1.0 + sector * 0.22))
@@ -1048,7 +1069,7 @@ func update_balls(delta: float) -> void:
 			ball.returning = true
 			continue
 		connect_ball(ball, from)
-		if mode != "fight":
+		if not battle_live():
 			return
 
 func connect_ball(ball: Dictionary, from: Vector2) -> void:
@@ -1116,7 +1137,7 @@ func ball_hit(enemy: Dictionary, kind: int, power: int, contact: Vector2,
 			emit_fx("frost", center, SKY, 0.31, 48 if fused else 32)
 			sound.play_cue("ice")
 	damage_enemy(enemy, power, GOLD if bonus else color, heavy)
-	if mode != "fight":
+	if not battle_live():
 		return
 	if kind in [0, 4, 6, 7]:
 		var reach := 83 if fused else 59
@@ -1129,7 +1150,7 @@ func ball_hit(enemy: Dictionary, kind: int, power: int, contact: Vector2,
 				if freeze:
 					near.slow = 2.2
 				damage_enemy(near, maxi(3, floori(power * 0.5)), color, fused)
-	if mode != "fight":
+	if not battle_live():
 		return
 	if kind in [2, 5, 6, 9]:
 		var count := 3 if kind >= BASE_BALLS else 1
@@ -1142,11 +1163,11 @@ func ball_hit(enemy: Dictionary, kind: int, power: int, contact: Vector2,
 				near.slow = 2.2
 			damage_enemy(near, maxi(3, floori(power * 0.5)), LILAC, fused)
 			count -= 1
-			if count == 0 or mode != "fight":
+			if count == 0 or not battle_live():
 				break
 
 func damage_enemy(enemy: Dictionary, power: int, color: Color = CREAM, heavy: bool = false) -> void:
-	if mode != "fight" or enemy.hp <= 0 or victory_time > 0:
+	if not battle_live() or enemy.hp <= 0 or victory_time > 0:
 		return
 	enemy.hp -= power
 	enemy.flash = 0.11
@@ -1229,7 +1250,7 @@ func update_pickups(delta: float) -> void:
 
 func xp_needed() -> int:
 	var tiers := level - 1
-	return 8 + level * 3 + floori(tiers * tiers / 12.0)
+	return 8 + level * 6 + tiers * tiers
 
 func bank_upgrade_points() -> void:
 	while xp >= xp_needed():
@@ -1247,7 +1268,6 @@ func open_level() -> void:
 	play_sound(2)
 
 func close_upgrades() -> void:
-	selected_upgrade = -1
 	mode = "fight"
 
 func prepare_upgrades() -> void:
@@ -1295,7 +1315,6 @@ func choose(index: int) -> void:
 			modules[index] += 1
 	upgrade_points -= 1
 	options.clear()
-	selected_upgrade = -1
 	if upgrade_points == 0:
 		close_upgrades()
 	else:
@@ -1303,7 +1322,7 @@ func choose(index: int) -> void:
 	play_sound(2)
 
 func finish(won: bool) -> void:
-	if mode not in ["fight", "pause"]:
+	if mode not in ["fight", "pause", "level"]:
 		return
 	last_reward = floori(earned / 3.0) + (20 if won else 0) + floori(elapsed / 30.0)
 	last_salt_reward = 0
@@ -1625,7 +1644,7 @@ func ship_fittings(in_battle: bool) -> Vector3i:
 	return Vector3i(color_tier, armor, guns | (engines << 1))
 
 func choice_rect(index: int) -> Rect2:
-	return Rect2(battle_layout.dialog_origin + Vector2(40, 319 + index * 103), Vector2(400, 91))
+	return Rect2(battle_layout.dialog_origin + Vector2(22 + index * 148, 318), Vector2(140, 236))
 
 func draw_home() -> void:
 	draw_chart(sector, wins > 0)
@@ -1724,41 +1743,51 @@ func draw_dock_resource(rect: Rect2, sprite: String, title: String, count: int, 
 	words(title, Vector2(rect.position.x + 56, center_y + 6), 17, CREAM)
 	words(str(count), Vector2(rect.end.x - 29, center_y + 7), 21, color, true)
 
+func choice_is_fusion(index: int) -> bool:
+	return index >= BASE_BALLS and index < modules.size() and modules[index] == 0
+
 func draw_choices() -> void:
-	shade()
+	shade(0.5)
 	var offset := battle_layout.dialog_origin
 	place_interface(offset)
-	tile(Rect2(24, 202, 432, 501), PANEL, STEEL)
-	words("强化等级", Vector2(240, 250), 34, CREAM, true)
-	words("剩余升级点 %d" % upgrade_points, Vector2(240, 278), 16, GOLD, true)
-	words("弹球槽 %d/%d · 基础球升到二级可融合" %
-		[modules.size() - modules.count(0), BALL_SLOTS], Vector2(240, 301), 14, MIST, true)
+	var bounce := 0.0 if reduced_fx else sin(clock * 6) * 3
+	words("升级！", Vector2(240, 262 + bounce), 46, GOLD, true)
+	var hint := "点一张卡立即生效"
+	if upgrade_points > 1:
+		hint += "  ·  还有 %d 次" % upgrade_points
+	words(hint, Vector2(240, 296), 16, CREAM, true)
 	for i in range(options.size()):
 		var index := options[i]
 		var choice: Array = CHOICES[index]
+		var accent: Color = choice[2]
+		var fusion := choice_is_fusion(index)
 		var rect := choice_rect(i)
 		rect.position -= offset
-		var selected := index == selected_upgrade
-		rect = press_tile(rect, PANEL.lerp(choice[2], 0.11) if selected else INK,
-			choice[2] if selected else choice[2].darkened(0.38))
-		if selected:
-			pixel_sprite("crosshair", rect.end - Vector2(25, 28), 2, choice[2])
-		pixel_sprite("scrap", rect.position + Vector2(31, 44), 4, choice[2])
-		var title: String = choice[0]
-		if index >= BASE_BALLS and index < modules.size() and modules[index] == 0:
-			title += "  ·  融合"
-		words(title, rect.position + Vector2(64, 34), 23, choice[2])
-		if index < modules.size() and (index < BASE_BALLS or modules[index] > 0):
-			var title_width := art_font.get_string_size(title, HORIZONTAL_ALIGNMENT_LEFT, -1, 23).x
-			draw_level_stars(rect.position + Vector2(78 + title_width, 26), modules[index] + 1, 3, 5.8, 13)
-		words(choice[1], rect.position + Vector2(65, 65), 16, CREAM)
-	var back := press_tile(UPGRADE_CLOSE, PANEL, STEEL)
-	words("继续航行", back.get_center() + Vector2(0, 6), 18, CREAM, true)
-	if selected_upgrade >= 0:
-		button(UPGRADE_CONFIRM, "升级 · 1点", MINT)
-	else:
-		press_tile(UPGRADE_CONFIRM, INK, STEEL, 0.0)
-		words("选择一张卡", UPGRADE_CONFIRM.get_center() + Vector2(0, 6), 17, MIST, true)
+		var face_color := LILAC if fusion else (PANEL.lerp(accent, 0.28) if index < modules.size() else PANEL)
+		rect = press_tile(rect, face_color, accent)
+		if fusion:
+			words("融合", rect.position + Vector2(rect.size.x * 0.5, 24), 15, INK, true)
+		pixel_sprite("scrap", rect.position + Vector2(rect.size.x * 0.5, 74), 6, accent if not fusion else CREAM)
+		words(choice[0], rect.position + Vector2(rect.size.x * 0.5, 138), 25, CREAM, true)
+		if index < modules.size() and not fusion:
+			draw_level_stars(rect.position + Vector2(rect.size.x * 0.5 - 13, 156), modules[index] + 1, 3, 5.5, 13)
+		draw_wrapped(choice[1], rect.position + Vector2(12, 188), rect.size.x - 24, 15,
+			INK if fusion else CREAM)
+
+# Character-wise wrap for short Chinese descriptions inside cards.
+func draw_wrapped(text: String, origin: Vector2, width: float, size: int, color: Color) -> void:
+	var line := ""
+	var y := origin.y
+	for character in text:
+		var attempt := line + character
+		if line != "" and art_font.get_string_size(attempt, HORIZONTAL_ALIGNMENT_LEFT, -1, size).x > width:
+			words(line, Vector2(origin.x + width * 0.5, y), size, color, true)
+			line = character
+			y += size + 5
+		else:
+			line = attempt
+	if line != "":
+		words(line, Vector2(origin.x + width * 0.5, y), size, color, true)
 
 func draw_pause() -> void:
 	shade()
