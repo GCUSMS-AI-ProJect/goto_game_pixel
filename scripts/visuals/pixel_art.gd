@@ -3,17 +3,21 @@ extends Node2D
 const ARENA := Rect2(23, 132, 434, 740)
 # Top of the zone the ship can move in.
 const PILOT_TOP := 470.0
-const INK := Color("#0b1320")
-const PANEL := Color("#172638")
-const STEEL := Color("#344c62")
-const CREAM := Color("#fff0cd")
-const MIST := Color("#a4bbc4")
-const MINT := Color("#79eac1")
-const GOLD := Color("#ffe081")
-const PEACH := Color("#ffb47d")
-const CORAL := Color("#ff7775")
-const LILAC := Color("#bb9bf2")
-const SKY := Color("#83cefc")
+# Saturated arcade palette: enemies lean violet/pink, the player cyan, rewards gold, damage pink.
+const INK := Color("#170b2e")
+const PANEL := Color("#2b1f5c")
+const STEEL := Color("#5a48a8")
+const CREAM := Color("#fff8ea")
+const MIST := Color("#c3b6e8")
+const MINT := Color("#4dffb0")
+const GOLD := Color("#ffd23f")
+const PEACH := Color("#ff9a3d")
+const CORAL := Color("#ff4f7a")
+const LILAC := Color("#b45cff")
+const SKY := Color("#3fe0ff")
+const SEA := Color("#1b5fd6")
+const SEA_DEEP := Color("#123c9c")
+const SEA_FOAM := Color("#7fd2ff")
 const ART_FONT := preload("res://assets/fonts/outpost_sans.ttf")
 const UI_GLYPHS := preload("res://assets/fonts/outpost_sans_ui.ttf")
 var art_font := FontVariation.new()
@@ -23,6 +27,9 @@ var interface_press := Vector2.INF
 var interface_pressure := 0.0
 var interface_box := StyleBoxFlat.new()
 var button_box := StyleBoxFlat.new()
+var shadow_box := StyleBoxFlat.new()
+# Every sprite with a one-pixel ink outline baked in, built once at start-up.
+var sprites := {}
 const WATER := preload("res://assets/backgrounds/battle_sea.png")
 const HARBOR := preload("res://assets/backgrounds/harbor.png")
 const SPRITES := {
@@ -55,18 +62,39 @@ const SPRITES := {
 func setup_art() -> void:
 	art_font.base_font = ART_FONT
 	art_font.fallbacks = [UI_GLYPHS]
-	interface_box.set_corner_radius_all(2)
-	interface_box.set_border_width_all(1)
-	interface_box.shadow_size = 2
-	interface_box.shadow_offset = Vector2(0, 3)
-	interface_box.anti_aliasing = false
-	button_box.set_corner_radius_all(8)
-	button_box.shadow_size = 4
+	for box in [interface_box, button_box, shadow_box]:
+		box.set_corner_radius_all(10)
+		box.anti_aliasing = false
+	interface_box.set_border_width_all(3)
+	button_box.set_border_width_all(3)
+	shadow_box.bg_color = INK
 	texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+	for name in SPRITES:
+		sprites[name] = outlined(SPRITES[name])
+
+func outlined(texture: Texture2D) -> Texture2D:
+	var source := texture.get_image()
+	if source.is_compressed():
+		source.decompress()
+	source.convert(Image.FORMAT_RGBA8)
+	var size := source.get_size() + Vector2i(2, 2)
+	var base := Image.create(size.x, size.y, false, Image.FORMAT_RGBA8)
+	base.blit_rect(source, Rect2i(Vector2i.ZERO, source.get_size()), Vector2i.ONE)
+	var result := base.duplicate() as Image
+	for y in range(size.y):
+		for x in range(size.x):
+			if base.get_pixel(x, y).a > 0.5:
+				continue
+			for step in [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]:
+				var n: Vector2i = Vector2i(x, y) + step
+				if n.x >= 0 and n.y >= 0 and n.x < size.x and n.y < size.y and base.get_pixelv(n).a > 0.5:
+					result.set_pixel(x, y, INK)
+					break
+	return ImageTexture.create_from_image(result)
 
 func pixel_sprite(name: String, position: Vector2, scale_factor: int, tint := Color.WHITE,
 		stretch := Vector2.ONE) -> void:
-	var texture: Texture2D = SPRITES[name]
+	var texture: Texture2D = sprites.get(name, SPRITES[name])
 	var size := (texture.get_size() * scale_factor * stretch).snapped(Vector2(2, 2))
 	draw_texture_rect(texture, Rect2((position - size * 0.5).snapped(Vector2(2, 2)), size), false,
 		Color(tint, tint.a * interface_opacity))
@@ -77,7 +105,12 @@ func words(value: String, position: Vector2, size: int, color := CREAM, centered
 		position.x -= width * 0.5
 	elif right:
 		position.x -= width
-	draw_string(art_font, position.round(), value, HORIZONTAL_ALIGNMENT_LEFT, -1, size, Color(color, color.a * interface_opacity))
+	var alpha := color.a * interface_opacity
+	# Light text of headline size gets an ink outline so it reads on any background.
+	if size >= 17 and color.get_luminance() > 0.35:
+		draw_string_outline(art_font, position.round(), value, HORIZONTAL_ALIGNMENT_LEFT, -1, size,
+			maxi(4, size / 5), Color(INK, alpha))
+	draw_string(art_font, position.round(), value, HORIZONTAL_ALIGNMENT_LEFT, -1, size, Color(color, alpha))
 
 # Flat chunky block: ink border and a solid drop shadow.
 func tile_solid(rect: Rect2, fill: Color) -> void:
@@ -86,10 +119,11 @@ func tile_solid(rect: Rect2, fill: Color) -> void:
 	draw_rect(rect.grow(2), Color(INK, alpha))
 	draw_rect(rect, Color(fill, fill.a * alpha))
 
-func tile(rect: Rect2, fill: Color, border: Color) -> void:
+func tile(rect: Rect2, fill: Color, _border: Color) -> void:
+	shadow_box.bg_color = Color(INK, interface_opacity)
+	draw_style_box(shadow_box, Rect2(rect.position + Vector2(0, 6), rect.size))
 	interface_box.bg_color = Color(fill, fill.a * interface_opacity)
-	interface_box.border_color = Color(border, border.a * interface_opacity)
-	interface_box.shadow_color = Color(0.01, 0.02, 0.05, 0.52 * interface_opacity)
+	interface_box.border_color = Color(INK, interface_opacity)
 	draw_style_box(interface_box, rect)
 
 func press_amount(rect: Rect2) -> float:
@@ -97,17 +131,21 @@ func press_amount(rect: Rect2) -> float:
 
 func press_tile(rect: Rect2, fill: Color, accent: Color, amount := -1.0) -> Rect2:
 	var pressure := press_amount(rect) if amount < 0 else amount
-	rect.position.y += 2 * pressure
-	var face := fill.lerp(accent, 0.12).lightened(0.065 * pressure)
+	# Chunky key: solid ink shadow underneath; pressing sinks the face onto it.
+	shadow_box.bg_color = Color(INK, interface_opacity)
+	draw_style_box(shadow_box, Rect2(rect.position + Vector2(0, 5), rect.size))
+	rect.position.y += 4 * pressure
+	var face := fill.lerp(accent, 0.12).lightened(0.08 * pressure)
 	button_box.bg_color = Color(face, fill.a * interface_opacity)
-	button_box.shadow_offset = Vector2(0, 2 * (1.0 - pressure))
-	button_box.shadow_color = Color(0.01, 0.02, 0.05, (0.25 - 0.10 * pressure) * interface_opacity)
+	button_box.border_color = Color(INK, interface_opacity)
 	draw_style_box(button_box, rect)
+	draw_rect(Rect2(rect.position + Vector2(10, 5), Vector2(rect.size.x - 20, 3)),
+		Color(1, 1, 1, 0.16 * interface_opacity))
 	return rect
 
 func button(rect: Rect2, title: String, color: Color) -> void:
 	var face := press_tile(rect, color, color)
-	words(title, face.get_center() + Vector2(0, 7), 22, INK, true)
+	words(title, face.get_center() + Vector2(0, 9), 26, INK, true)
 
 func place_interface(origin: Vector2) -> void:
 	interface_origin = origin
@@ -126,11 +164,7 @@ func draw_harbor(time: float) -> void:
 		draw_rect(Rect2(floorf(x / 3) * 3, 159 + i * 4, 12, 2), Color(MIST, 0.30))
 
 func draw_arena(time: float, region: int) -> void:
-	draw_texture_rect(WATER, ARENA, false, Color("#d6bceb") if region == 1 else Color("#c6efe8"))
-	for i in range(12):
-		var x := 30 + i * 35
-		var y := 136 + int(fmod(time * (6 + i % 4) + 125 * i, 570))
-		draw_rect(Rect2(x, y, 3 + i % 3 * 3, 3), Color(SKY, 0.14))
+	draw_sea(ARENA, time, region)
 	draw_rect(ARENA.grow(2), STEEL, false, 2)
 	var rail_color := LILAC if region == 1 else MINT
 	for x in [24, 451]:
@@ -141,6 +175,25 @@ func draw_arena(time: float, region: int) -> void:
 	for x in range(30, 455, 22):
 		draw_rect(Rect2(x, ARENA.end.y - 9, 11, 3), Color(CORAL, 0.56))
 
+func draw_sea(area: Rect2, time: float, region := 0) -> void:
+	var deep := Color("#3b1f9c") if region == 1 else SEA_DEEP
+	var top := Color("#5a34d6") if region == 1 else SEA
+	var bands := 8
+	for band in range(bands):
+		var y := area.position.y + area.size.y * band / bands
+		draw_rect(Rect2(area.position.x, y, area.size.x, area.size.y / bands + 1), top.lerp(deep, float(band) / bands))
+	draw_texture_rect(WATER, area, false, Color(0.75, 0.9, 1.0, 0.16))
+	# Swell lines drift down past the ship, which reads as sailing forward.
+	for i in range(22):
+		var x := area.position.x + fposmod(i * 67.0 + sin(i * 1.7) * 30, area.size.x - 40)
+		var y := area.position.y + fposmod(time * (38 + i % 5 * 9) + i * 97.0, area.size.y)
+		var width := 14 + i % 4 * 10
+		x = snappedf(x, 2)
+		y = snappedf(y, 2)
+		draw_rect(Rect2(x, y, width, 3), Color(SEA_FOAM, 0.22 + 0.08 * (i % 3)))
+		if i % 4 == 0:
+			draw_rect(Rect2(x + snappedf(width * 0.3, 2), y + 5, 4, 2), Color(1, 1, 1, 0.35))
+
 func enemy_tint(kind: int) -> Color:
 	match kind:
 		0: return PEACH
@@ -150,7 +203,7 @@ func enemy_tint(kind: int) -> Color:
 
 func draw_enemy(enemy: Dictionary, sector: int, time: float) -> void:
 	var kind: int = enemy.kind
-	var size: int = [3, 3, 4, 5, 4][kind]
+	var size: int = [4, 4, 5, 6, 5][kind]
 	var wave := sin(time * (8 if kind < 3 else 5) + float(enemy.phase))
 	var pos: Vector2 = enemy.pos + enemy.recoil + Vector2(0, wave * 1.55)
 	var tint := Color("#83cefc") if enemy.slow > 0 else Color.WHITE
@@ -197,11 +250,12 @@ func draw_ship(position: Vector2, type: int, scale_factor: int, fittings: Vector
 
 func draw_pilot(position: Vector2, type: int, moving: Vector2, armor: float, time: float, fittings := Vector3i.ZERO) -> void:
 	if armor > 0 and int(time * 18) % 2 == 0:
-		draw_rect(Rect2(position - Vector2(21, 19), Vector2(42, 38)), Color(MINT, 0.53), false, 2)
-	var drift := Vector2(-moving.x * 3, 14)
+		draw_rect(Rect2(position - Vector2(27, 25), Vector2(54, 50)), Color(MINT, 0.6), false, 3)
+	var drift := Vector2(-moving.x * 4, 19)
 	var engine := (position + drift).snapped(Vector2(2, 2))
-	draw_rect(Rect2(engine.x - 3, engine.y, 6, 5 + int(time * 19) % 6), PEACH)
-	draw_ship(position, type, 3, fittings)
+	draw_rect(Rect2(engine.x - 5, engine.y, 10, 7 + int(time * 19) % 8), INK)
+	draw_rect(Rect2(engine.x - 3, engine.y, 6, 5 + int(time * 19) % 8), GOLD)
+	draw_ship(position, type, 4, fittings)
 
 func gauge(rect: Rect2, fraction: float, fill: Color) -> void:
 	draw_rect(rect, INK)

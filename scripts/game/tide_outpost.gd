@@ -896,7 +896,7 @@ func spawn_enemy(kind: int, position: Vector2, entry := Vector2.ZERO) -> void:
 		"attack": 1.5, "recoil": Vector2.ZERO, "entry": entry})
 
 func radius(kind: int) -> float:
-	return [15.0, 12.0, 20.0, 35.0, 26.0][kind]
+	return [19.0, 15.0, 25.0, 44.0, 32.0][kind]
 
 func update_enemies(delta: float) -> void:
 	for i in range(enemies.size() - 1, -1, -1):
@@ -950,7 +950,7 @@ func update_enemies(delta: float) -> void:
 				enemies.remove_at(i)
 				hurt(5 if kind != 2 else 10, true)
 				continue
-		if pilot.distance_squared_to(enemy.pos) < pow(radius(kind) + 11, 2):
+		if pilot.distance_squared_to(enemy.pos) < pow(radius(kind) + 13, 2):
 			hurt(20 if kind != 1 else 13, false)
 
 func hurt(amount: int, breach: bool) -> void:
@@ -970,7 +970,7 @@ func update_hazards(delta: float) -> void:
 		shot.pos += shot.vel * delta
 		if not ARENA.has_point(shot.pos):
 			hazards.remove_at(i)
-		elif pilot.distance_squared_to(shot.pos) < 18.0 * 18.0:
+		elif pilot.distance_squared_to(shot.pos) < 20.0 * 20.0:
 			hurt(15, false)
 			hazards.remove_at(i)
 
@@ -1389,7 +1389,7 @@ func _draw() -> void:
 		var point: Vector2 = item.pos
 		draw_at_world_point(point, world, sprite_scale)
 		draw_rect(Rect2(point - Vector2(7, 7), Vector2(14, 14)), Color(MINT, 0.09))
-		pixel_sprite("scrap", item.pos, 2)
+		pixel_sprite("scrap", item.pos, 3)
 		if not reduced_fx and fposmod(item.age, 0.9) < 0.27:
 			draw_flare(point + Vector2(7, -6), Vector2.UP, 4.0, Color(CREAM, 0.62))
 	for enemy in enemies:
@@ -1410,7 +1410,7 @@ func _draw() -> void:
 		if effect.kind == "wake" and not reduced_fx:
 			var image_fade := 1.0 - float(effect.age) / float(effect.duration)
 			draw_at_world_point(effect.pos, world, sprite_scale)
-			pixel_sprite("pilot" if pilot_type == 0 else "swift", effect.pos, 3, Color(SKY, 0.35 * image_fade))
+			pixel_sprite("pilot" if pilot_type == 0 else "swift", effect.pos, 4, Color(SKY, 0.35 * image_fade))
 			draw_set_transform_matrix(world)
 		draw_combat_effect(effect)
 	draw_at_world_point(pilot, world, sprite_scale)
