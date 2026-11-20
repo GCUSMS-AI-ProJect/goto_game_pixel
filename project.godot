@@ -1,0 +1,26 @@
+config_version=5
+
+[application]
+config/name="潮汐前哨"
+config/icon="res://assets/branding/app_icon.png"
+run/main_scene="res://scenes/tide_outpost.tscn"
+config/features=PackedStringArray("4.7", "GL Compatibility")
+
+[display]
+window/size/viewport_width=480
+window/size/viewport_height=854
+window/size/window_width_override=480
+window/size/window_height_override=854
+window/stretch/mode="canvas_items"
+window/stretch/aspect="expand"
+window/handheld/orientation=1
+
+[input_devices]
+pointing/emulate_mouse_from_touch=false
+
+[rendering]
+renderer/rendering_method="gl_compatibility"
+renderer/rendering_method.mobile="gl_compatibility"
+textures/canvas_textures/default_texture_filter=0
+textures/vram_compression/import_etc2_astc=true
+environment/defaults/default_clear_color=Color(0.043, 0.074, 0.127, 1)

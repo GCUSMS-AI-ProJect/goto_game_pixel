@@ -1,0 +1,17 @@
+/.godot/
+/dist/
+/android/
+/export_credentials.cfg
+*.keystore
+*.jks
+*.pfx
+*.p12
+*.apk
+*.aab
+*.exe
+*.pck
+*.idsig
+*.log
+*.tmp
+__pycache__/
+.venv/
