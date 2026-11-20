@@ -72,6 +72,13 @@ func hit_label(enemy: Dictionary, damage: int, color: Color, heavy: bool) -> voi
 	damage_labels.append({"id": enemy.id, "pos": enemy.pos, "damage": damage,
 		"color": color, "age": 0.0, "heavy": heavy})
 
+# Floating word over an enemy that is not a damage number ("+12" heal, "闪避" dodge).
+func tag_label(enemy: Dictionary, text: String, color: Color) -> void:
+	if damage_labels.size() >= MAX_DAMAGE_LABELS:
+		damage_labels.pop_front()
+	damage_labels.append({"id": enemy.id, "pos": enemy.pos + Vector2(0, -10), "damage": 0,
+		"color": color, "age": 0.0, "heavy": true, "text": text})
+
 func draw_damage_labels(world: Transform2D) -> void:
 	for label in damage_labels:
 		var age: float = label.age
@@ -84,7 +91,7 @@ func draw_damage_labels(world: Transform2D) -> void:
 		var opacity := clampf((0.51 - age) * 8, 0, 1)
 		var pop := maxf(0.0, 1.0 - age / 0.09)
 		var size := roundi((22.0 if label.heavy else 15.0) * (1.0 + pop * (0.7 if label.heavy else 0.4)))
-		var text := str(label.damage) + ("!" if label.heavy else "")
+		var text: String = label.get("text", str(label.damage) + ("!" if label.heavy else ""))
 		var outline := Color(INK, opacity)
 		for offset in [Vector2(-2, 0), Vector2(2, 0), Vector2(0, -2), Vector2(0, 3)]:
 			words(text, pos + offset, size, outline, true)

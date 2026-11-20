@@ -4,7 +4,6 @@ const AudioDirector = preload("res://scripts/audio/audio_director.gd")
 const BattleLayout = preload("res://scripts/ui/battle_layout.gd")
 const MetaProgress = preload("res://scripts/game/meta_progress.gd")
 const SAVE = "user://dock.cfg"
-const PILOT_AREA = Rect2(40, PILOT_TOP, 400, 372)
 const LAUNCH = Rect2(60, 580, 360, 84)
 const PAUSE_BUTTONS = [Rect2(47, 362, 386, 62), Rect2(47, 437, 386, 62), Rect2(47, 512, 386, 62)]
 const MOTION_OPTION = Rect2(49, 492, 382, 54)
@@ -25,6 +24,11 @@ const PERKS_CLOSE := Rect2(60, 712, 360, 56)
 const MENU_PAGES := ["home", "dock", "perks"]
 const AUDIO_DONE = Rect2(49, 561, 382, 56)
 const DRAG_THRESHOLD := 12.0
+# Dash is earned: it unlocks at this run level and is triggered by a double tap.
+const DASH_UNLOCK_LEVEL := 3
+const DOUBLE_TAP_GAP := 0.32
+const TAP_MAX_TIME := 0.26
+const TAP_MAX_TRAVEL := 18.0
 const NO_POINTER := -2
 const ANDROID_GESTURE_MARGIN := 36.0
 const CHAIN_WINDOW = 1.45
@@ -100,6 +104,15 @@ var arena_pointer := NO_POINTER
 var arena_down := Vector2.ZERO
 var arena_dragged := false
 var control_presses := {}
+# Short presses anywhere in the arena, by pointer, to detect double taps.
+var tap_presses := {}
+var last_tap_time := -9.0
+var last_tap_point := Vector2.ZERO
+var last_move_dir := Vector2.UP
+var notice_text := ""
+var notice_time := 0.0
+var skills_seen := {}
+var notice_color := GOLD
 var control_feedback := [0.0, 0.0, 0.0]
 var menu_pointer := NO_POINTER
 var menu_press_point := Vector2.INF
@@ -210,10 +223,23 @@ func refresh_layout() -> void:
 	layout_canvas = canvas
 	layout_safe = safe_area
 	battle_layout = BattleLayout.new(canvas, safe_area, ARENA, ANDROID_GESTURE_MARGIN if android else 0.0)
+	ARENA.size.y = battle_layout.world_height
 	clear_drag()
 
 func menu_origin() -> Vector2:
 	return (layout_canvas.get_center() - BattleLayout.DESIGN_SIZE * 0.5).floor()
+
+# Menu pages use the 480x854 design frame. On taller screens the top bar is pinned to the
+# top edge and the tab bar to the bottom edge; these are their offsets from the centred frame.
+func menu_shift_top() -> float:
+	return minf(0.0, ceilf(layout_safe.position.y) - menu_origin().y)
+
+func menu_shift_bottom() -> float:
+	return maxf(0.0, floorf(layout_safe.end.y) - BattleLayout.DESIGN_SIZE.y - menu_origin().y)
+
+# Ship movement zone: the lower part of the sea, whatever its height.
+func pilot_area() -> Rect2:
+	return Rect2(40, ARENA.end.y - 402, 400, 372)
 
 func settings_origin() -> Vector2:
 	return menu_origin() if settings_return in MENU_PAGES else battle_layout.dialog_origin
@@ -359,7 +385,7 @@ func improve_facility(kind: int) -> void:
 func start_run() -> void:
 	ship_drawer = false
 	ship_slide = 0
-	pilot = Vector2(240, 760)
+	pilot = Vector2(240, ARENA.end.y - 112)
 	max_hp = 100 + 15 * buildings[0] - 15 * pilot_type
 	hp = max_hp
 	xp = 0
@@ -408,6 +434,10 @@ func start_run() -> void:
 	swarm_clock = 2.5
 	scrap_streak = 0
 	scrap_chime_time = 0.0
+	last_tap_time = -9.0
+	notice_text = ""
+	notice_time = 0.0
+	skills_seen.clear()
 	reset_fx()
 	clear_drag()
 	mode = "fight"
@@ -417,6 +447,7 @@ func clear_drag() -> void:
 	arena_pointer = NO_POINTER
 	arena_dragged = false
 	control_presses.clear()
+	tap_presses.clear()
 	menu_pointer = NO_POINTER
 	chart_dragging = false
 	menu_feedback = 0.0
@@ -444,7 +475,7 @@ func _input(event: InputEvent) -> void:
 		match event.keycode:
 			KEY_SPACE:
 				if mode == "fight":
-					activate_control(BattleLayout.Action.DASH)
+					dash()
 			KEY_R:
 				if mode == "fight":
 					activate_control(BattleLayout.Action.RECALL)
@@ -520,12 +551,23 @@ func begin_battle_press(pointer: int, point: Vector2) -> void:
 	var control := battle_layout.control_at(point)
 	if control >= 0 and (control != BattleLayout.Action.UPGRADE or upgrade_points > 0):
 		control_presses[pointer] = {"control": control, "origin": point}
-	elif arena_pointer == NO_POINTER and point.y > battle_layout.hud.end.y:
+		return
+	if point.y <= battle_layout.hud.end.y:
+		return
+	# Second quick tap: dash toward where it landed (or the way the ship was heading).
+	if clock - last_tap_time < DOUBLE_TAP_GAP and point.distance_to(last_tap_point) < 120:
+		last_tap_time = -9.0
+		dash(battle_layout.inverse_world * point)
+	else:
+		tap_presses[pointer] = {"time": clock, "origin": point}
+	if arena_pointer == NO_POINTER:
 		arena_pointer = pointer
 		arena_down = point
 		touch_origin = battle_layout.inverse_world * point
 
 func move_battle_press(pointer: int, point: Vector2) -> void:
+	if tap_presses.has(pointer) and point.distance_to(tap_presses[pointer].origin) > TAP_MAX_TRAVEL:
+		tap_presses.erase(pointer)
 	if pointer == arena_pointer:
 		if arena_dragged or point.distance_to(arena_down) >= DRAG_THRESHOLD:
 			arena_dragged = true
@@ -536,6 +578,12 @@ func move_battle_press(pointer: int, point: Vector2) -> void:
 			control_presses.erase(pointer)
 
 func end_battle_press(pointer: int, point: Vector2, canceled := false) -> void:
+	if tap_presses.has(pointer):
+		var tap: Dictionary = tap_presses[pointer]
+		tap_presses.erase(pointer)
+		if not canceled and clock - float(tap.time) < TAP_MAX_TIME and point.distance_to(tap.origin) <= TAP_MAX_TRAVEL:
+			last_tap_time = clock
+			last_tap_point = point
 	if pointer == arena_pointer:
 		arena_pointer = NO_POINTER
 		arena_dragged = false
@@ -589,11 +637,12 @@ func press(point: Vector2) -> bool:
 			if tab >= 0:
 				activate_tab(tab)
 			else:
+				var high := point - Vector2(0, menu_shift_top())
 				for resource in range(2):
-					if harvest_rect(resource).has_point(point):
+					if harvest_rect(resource).has_point(high):
 						harvest(resource)
 				for kind in range(BUILDINGS.size()):
-					if facility_rect(kind).has_point(point):
+					if facility_rect(kind).has_point(high):
 						improve_facility(kind)
 		"level":
 			for i in range(options.size()):
@@ -674,15 +723,24 @@ func set_audio_level(index: int, position: float) -> void:
 		sound.effects_level = value
 		sound.play_cue("hit")
 
-func dash() -> void:
-	if charges == 0 or dash_time > 0:
+func dash_unlocked() -> bool:
+	return level >= DASH_UNLOCK_LEVEL
+
+func dash(toward := Vector2.INF) -> void:
+	if mode != "fight" or not dash_unlocked() or charges == 0 or dash_time > 0:
 		return
-	dash_direction = movement.normalized() if movement.length() > 0.1 else Vector2.UP
+	if movement.length() > 0.1:
+		dash_direction = movement.normalized()
+	elif toward != Vector2.INF and pilot.distance_to(toward) > 24:
+		dash_direction = pilot.direction_to(toward)
+	else:
+		dash_direction = last_move_dir
 	dash_time = 0.17
 	armor_time = maxf(armor_time, 0.4)
 	charges -= 1
 	emit_fx("wake", pilot, SKY, 0.28, 27, -dash_direction)
 	play_sound(1)
+	buzz(18)
 
 func recall_balls() -> void:
 	if mode != "fight" or recall_time > 0 or balls.is_empty():
@@ -746,7 +804,7 @@ func score_scene() -> AudioDirector.Scene:
 		return AudioDirector.Scene.SEARCH
 	if boss_spawned:
 		return AudioDirector.Scene.BOSS
-	return AudioDirector.Scene.COMBAT if encounter_time > 0 else AudioDirector.Scene.SEARCH
+	return AudioDirector.Scene.COMBAT
 
 func tick_battle(delta: float) -> void:
 	elapsed += delta
@@ -755,6 +813,7 @@ func tick_battle(delta: float) -> void:
 		combo_hits = 0
 	recall_time = maxf(0, recall_time - delta)
 	wave_banner = maxf(0, wave_banner - delta)
+	notice_time = maxf(0, notice_time - delta)
 	armor_time = maxf(0, armor_time - delta)
 	var keyboard := Vector2(
 		float(Input.is_physical_key_pressed(KEY_D) or Input.is_key_pressed(KEY_RIGHT)) - float(Input.is_physical_key_pressed(KEY_A) or Input.is_key_pressed(KEY_LEFT)),
@@ -768,7 +827,10 @@ func tick_battle(delta: float) -> void:
 		speed = 615
 		if floori(maxf(0, dash_time) * 25) < floori(previous_dash * 25):
 			emit_fx("wake", pilot, SKY, 0.25, 28, -dash_direction)
-	pilot = (pilot + movement * speed * delta).clamp(PILOT_AREA.position, PILOT_AREA.end)
+	if movement.length() > 0.2:
+		last_move_dir = movement.normalized()
+	var zone := pilot_area()
+	pilot = (pilot + movement * speed * delta).clamp(zone.position, zone.end)
 	if charges < max_charges:
 		recharge += delta
 		if recharge >= 4.5:
@@ -877,9 +939,82 @@ func spawn_enemy(kind: int, position: Vector2, entry := Vector2.ZERO) -> void:
 		capacity += maxi(wave - 1, 0)
 	capacity = roundi(capacity * (1.0 + sector * 0.22))
 	next_id += 1
+	var skill := roll_skill(kind)
 	enemies.append({"id": next_id, "kind": kind, "pos": position, "hp": capacity, "max_hp": capacity,
 		"slow": 0.0, "phase": rng.randf_range(0, TAU), "flash": 0.0, "fired": false,
-		"attack": 1.5, "recoil": Vector2.ZERO, "entry": entry})
+		"attack": 1.5, "recoil": Vector2.ZERO, "entry": entry, "skill": skill,
+		"skill_clock": rng.randf_range(1.6, 3.0), "dodge_cd": 0.0, "dodge_vel": Vector2.ZERO})
+	if skill != "" and not skills_seen.has(skill) and kind != 3:
+		skills_seen[skill] = true
+		if skill == "heal":
+			notice("小心：绿十字敌人会给周围回血", MINT)
+		elif skill == "dodge":
+			notice("小心：蓝箭头敌人会闪避弹球", SKY)
+
+# Tougher enemies learn tricks as the run goes on: healers patch up their pack,
+# dodgers sidestep a ball every few seconds. The elite does both; the boss heals.
+func roll_skill(kind: int) -> String:
+	var threat := elapsed + sector * 25.0
+	match kind:
+		0:
+			if threat > 45 and rng.randf() < 0.14:
+				return "heal"
+		1:
+			if threat > 22 and rng.randf() < minf(0.45, 0.18 + threat / 300.0):
+				return "dodge"
+		2:
+			if threat > 35 and rng.randf() < 0.4:
+				return "heal"
+		3:
+			return "heal"
+		4:
+			return "both"
+	return ""
+
+func can_heal(enemy: Dictionary) -> bool:
+	return enemy.skill == "heal" or enemy.skill == "both"
+
+func can_dodge(enemy: Dictionary) -> bool:
+	return (enemy.skill == "dodge" or enemy.skill == "both") and enemy.dodge_cd <= 0
+
+func notice(text: String, color: Color) -> void:
+	notice_text = text
+	notice_time = 2.6
+	notice_color = color
+
+func heal_pulse(source: Dictionary) -> void:
+	var boss: bool = source.kind == 3
+	var reach := 0.0 if boss else 105.0
+	var healed := false
+	for ally in enemies:
+		if ally.hp >= ally.max_hp or ally.hp <= 0 or ally.entry != Vector2.ZERO:
+			continue
+		if ally.id != source.id and (boss or source.pos.distance_squared_to(ally.pos) > reach * reach):
+			continue
+		var amount := maxi(2, roundi(ally.max_hp * (0.05 if ally.kind == 3 else 0.3)))
+		ally.hp = mini(ally.max_hp, ally.hp + amount)
+		tag_label(ally, "+%d" % amount, MINT)
+		healed = true
+	if healed:
+		emit_fx("recall", source.pos, MINT, 0.5, reach if not boss else 80.0)
+		sound.play_cue("heal")
+
+func try_dodge(enemy: Dictionary, ball: Dictionary, direction: Vector2) -> bool:
+	if not can_dodge(enemy) or ball.charged or rng.randf() > 0.6:
+		return false
+	enemy.dodge_cd = 2.0 if enemy.kind == 4 else 2.8
+	var side := direction.orthogonal()
+	if rng.randf() < 0.5:
+		side = -side
+	if enemy.pos.x + side.x * 45 < 50 or enemy.pos.x + side.x * 45 > 430:
+		side = -side
+	enemy.dodge_vel = side * 560
+	ball.cooldown = 0.3
+	ball.target = enemy.id
+	emit_fx("hit", enemy.pos, SKY, 0.2, 30, -side)
+	tag_label(enemy, "闪避", SKY)
+	sound.play_cue("motion", 1.45)
+	return true
 
 func radius(kind: int) -> float:
 	return [19.0, 15.0, 25.0, 44.0, 32.0][kind]
@@ -897,6 +1032,16 @@ func update_enemies(delta: float) -> void:
 				enemy.entry = Vector2.ZERO
 			continue
 		var kind: int = enemy.kind
+		enemy.dodge_cd = maxf(0, enemy.dodge_cd - delta)
+		if enemy.dodge_vel != Vector2.ZERO:
+			enemy.pos += enemy.dodge_vel * delta
+			enemy.pos.x = clampf(enemy.pos.x, 42, 438)
+			enemy.dodge_vel = enemy.dodge_vel.move_toward(Vector2.ZERO, 2600 * delta)
+		if can_heal(enemy):
+			enemy.skill_clock -= delta
+			if enemy.skill_clock <= 0:
+				enemy.skill_clock = 6.0 if kind == 3 else 3.4
+				heal_pulse(enemy)
 		if kind == 3:
 			enemy.pos.y = move_toward(enemy.pos.y, 345, delta * 42 * slow_factor)
 			enemy.pos.x = 240 + sin(elapsed * 0.53) * (132 if sector == 0 else 95)
@@ -1081,6 +1226,8 @@ func connect_ball(ball: Dictionary, from: Vector2) -> void:
 		return
 	var contact_point := from + step * nearest
 	var direction: Vector2 = ball.vel.normalized()
+	if try_dodge(target, ball, direction):
+		return
 	var normal: Vector2 = target.pos.direction_to(contact_point)
 	if normal.is_zero_approx():
 		normal = -direction
@@ -1168,6 +1315,7 @@ func damage_enemy(enemy: Dictionary, power: int, color: Color = CREAM, heavy: bo
 	emit_fx("break", enemy.pos, enemy_tint(enemy.kind), 0.54 if enemy.kind >= 3 else 0.36,
 		120 if enemy.kind == 3 else 64 if enemy.kind == 4 else 44)
 	emit_fx("hit", enemy.pos, CREAM, 0.16, 52, Vector2.UP)
+	sound.play_cue("crush", 0.8 if enemy.kind >= 2 else 1.0)
 	sound.play_cue("thump", 0.9 if enemy.kind >= 2 else 1.0)
 	if enemy.kind == 3:
 		begin_victory(enemy.pos)
@@ -1232,13 +1380,17 @@ func update_pickups(delta: float) -> void:
 
 func xp_needed() -> int:
 	var tiers := level - 1
-	return 8 + level * 6 + tiers * tiers
+	# Roughly twice the old curve: a level every 10-15 s early, slower later.
+	return 16 + level * 11 + tiers * tiers * 2
 
 func bank_upgrade_points() -> void:
 	while xp >= xp_needed():
 		xp -= xp_needed()
 		level += 1
 		upgrade_points += 1
+		if level == DASH_UNLOCK_LEVEL:
+			charges = max_charges
+			notice("解锁闪避 · 双击屏幕冲刺", SKY)
 
 func open_level() -> void:
 	if mode != "fight" or upgrade_points == 0:
@@ -1366,7 +1518,7 @@ func _draw() -> void:
 	draw_rect(layout_canvas, INK)
 	var page := settings_return if mode == "settings" else mode
 	if page in MENU_PAGES:
-		place_interface(menu_origin())
+		place_interface(menu_origin() + Vector2(0, menu_shift_top() if page == "dock" else 0.0))
 		if page == "dock":
 			draw_dock()
 		else:
@@ -1433,6 +1585,7 @@ func _draw() -> void:
 	draw_low_health()
 	draw_battle_hud(boss_hp)
 	draw_battle_controls()
+	draw_notice()
 	if mode == "level":
 		draw_choices()
 	elif mode == "pause":
@@ -1549,25 +1702,40 @@ func control_is_pressed(control: int) -> bool:
 			return true
 	return false
 
+# Dash has no button: once unlocked, a small charge meter sits in the bottom-left corner.
 func draw_battle_controls() -> void:
-	var rect := battle_layout.controls[BattleLayout.Action.DASH]
+	var arena := battle_layout.arena
+	if not dash_unlocked():
+		var hint := "Lv%d 解锁闪避" % DASH_UNLOCK_LEVEL
+		words(hint, Vector2(arena.position.x + 14, arena.end.y - 16), 14, Color(MIST, 0.7))
+		return
 	var ready := charges > 0 and dash_time <= 0
-	var held: bool = control_is_pressed(BattleLayout.Action.DASH) or control_feedback[BattleLayout.Action.DASH] > 0
-	var sink := 4.0 if held else 0.0
-	var center := rect.get_center()
-	var radius := rect.size.x * 0.5
-	draw_circle(center + Vector2(0, 5), radius, INK, true, -1, true)
-	var face := center + Vector2(0, sink)
-	draw_circle(face, radius, INK, true, -1, true)
-	draw_circle(face, radius - 4, SKY if ready else STEEL, true, -1, true)
-	draw_circle(face + Vector2(0, -6), radius - 14, Color(1, 1, 1, 0.18), true, -1, true)
-	if charges < max_charges:
-		draw_arc(face, radius - 4, -PI * 0.5, -PI * 0.5 + TAU * recharge / 4.5, 32, GOLD, 5, true)
-	words("闪避", face + Vector2(0, 9), 24, INK if ready else MIST, true)
-	var pip := face + Vector2(radius * 0.7, -radius * 0.7)
-	draw_circle(pip, 14, INK, true, -1, true)
-	draw_circle(pip, 11, GOLD, true, -1, true)
-	words(str(charges), pip + Vector2(0, 6), 16, INK, true)
+	var origin := Vector2(arena.position.x + 14, arena.end.y - 40)
+	words("双击闪避", origin + Vector2(0, -6), 14, SKY if ready else MIST)
+	for index in range(max_charges):
+		var cell := Rect2(origin + Vector2(index * 22, 2), Vector2(16, 16))
+		draw_rect(cell.grow(3), INK)
+		if index < charges:
+			draw_rect(cell, SKY)
+			draw_rect(Rect2(cell.position, Vector2(cell.size.x, 3)), Color(1, 1, 1, 0.5))
+		elif index == charges:
+			draw_rect(cell, Color(STEEL, 0.6))
+			draw_rect(Rect2(cell.position + Vector2(0, cell.size.y * (1 - recharge / 4.5)),
+				Vector2(cell.size.x, cell.size.y * recharge / 4.5)), Color(SKY, 0.55))
+		else:
+			draw_rect(cell, Color(STEEL, 0.6))
+
+func draw_notice() -> void:
+	if notice_time <= 0:
+		return
+	var arena := battle_layout.arena
+	var opacity := clampf(notice_time / 0.4, 0, 1)
+	var center := Vector2(arena.get_center().x, arena.position.y + arena.size.y * 0.42)
+	var width := art_font.get_string_size(notice_text, HORIZONTAL_ALIGNMENT_LEFT, -1, 19).x + 32
+	interface_opacity = opacity
+	tile_solid(Rect2(center - Vector2(width * 0.5, 22), Vector2(width, 40)), Color(INK, 0.92))
+	words(notice_text, center + Vector2(0, 5), 19, notice_color, true)
+	interface_opacity = 1.0
 
 # Equipped ball types circle the ship instead of filling a bar at the bottom.
 func draw_ball_orbit(world: Transform2D) -> void:
@@ -1615,7 +1783,7 @@ func draw_level_stars(origin: Vector2, count: int, columns: int, radius: float, 
 func draw_course() -> void:
 	for lane in range(7):
 		var x := 90 + lane * 50
-		for row in range(13):
+		for row in range(ceili(ARENA.size.y / 56.0)):
 			draw_rect(Rect2(x, 160 + row * 56, 2, 13), Color(MIST, 0.12))
 	if sector == 1:
 		var direction := 1 if floori(elapsed / 12.0) % 2 == 0 else -1
@@ -1818,12 +1986,15 @@ func offline_rate() -> int:
 func draw_home() -> void:
 	# Sea and dock fill well past the design frame so tall phones show no edges.
 	draw_sea(Rect2(-240, -240, 960, 1340), clock, sector)
-	for plank in range(6):
-		var y := 686 + plank * 18
+	# The pier starts a little lower on tall screens and its planks run down to the tab bar.
+	var low := menu_shift_bottom()
+	var pier := roundf(low * 0.35)
+	for plank in range(ceili((TAB_TOP + low - 686 - pier) / 18.0)):
+		var y := 686 + pier + plank * 18
 		draw_rect(Rect2(-240, y, 960, 18), Color("#8a5a2b") if plank % 2 == 0 else Color("#7a4e24"))
 		for x in range(-240, 720, 64):
 			draw_rect(Rect2(x + (plank % 2) * 32, y, 3, 18), Color("#5e3a19"))
-	draw_rect(Rect2(-240, 680, 960, 6), INK)
+	draw_rect(Rect2(-240, 680 + pier, 960, 6), INK)
 	var bob := 0.0 if reduced_fx else sin(clock * 1.8) * 6
 	var hull := Vector2(240, 375 + bob)
 	for ring in range(3):
@@ -1831,7 +2002,8 @@ func draw_home() -> void:
 		draw_polyline(pixel_ring(hull + Vector2(0, 52), 44 + spread, 16), Color(SEA_FOAM, 0.45 * (1 - spread / 78)), 3)
 	draw_ship(hull, pilot_type, 9, ship_fittings(false))
 	words("巡潮艇" if pilot_type == 0 else "疾燕", Vector2(240, 493), 26, CREAM, true)
-	# Top bar: captain level, resources, settings.
+	# Top bar: captain level, resources, settings, pinned to the top edge.
+	place_interface(menu_origin() + Vector2(0, menu_shift_top()))
 	var avatar := Rect2(12, 14, 44, 44)
 	tile_solid(avatar, GOLD)
 	words(str(captain_level()), avatar.get_center() + Vector2(0, 9), 24, INK, true)
@@ -1853,6 +2025,7 @@ func draw_home() -> void:
 	words("福利", perks.get_center() + Vector2(0, 7), 18, INK, true)
 	if meta.has_rewards():
 		red_dot(perks.position + Vector2(perks.size.x - 2, 2))
+	place_interface(menu_origin())
 	# Sea selector.
 	var stage := press_tile(HOME_STAGE, Color(INK, 0.9), GOLD)
 	var label := "第 %d 海域 · %s  ▸" % [sector + 1, SEA_NAMES[sector]]
@@ -1877,6 +2050,7 @@ func red_dot(center: Vector2) -> void:
 	draw_circle(center, 7, CORAL, true, -1, true)
 
 func draw_tabs(active: int) -> void:
+	place_interface(menu_origin() + Vector2(0, menu_shift_bottom()))
 	draw_rect(Rect2(-240, TAB_TOP, 960, 420), INK)
 	draw_rect(Rect2(-240, TAB_TOP, 960, 3), STEEL)
 	var icons := ["building0", "pilot", "arrow", "scrap", "gear"]
@@ -1889,8 +2063,11 @@ func draw_tabs(active: int) -> void:
 		words(TAB_NAMES[index], center + Vector2(0, 32), 15, GOLD if on else MIST, true)
 		if index == 3 and meta.has_rewards():
 			red_dot(center + Vector2(18, -12))
+	place_interface(menu_origin())
 
+# point is relative to menu_origin().
 func tab_at(point: Vector2) -> int:
+	point.y -= menu_shift_bottom()
 	if point.y < TAB_TOP or point.y > TAB_TOP + 64:
 		return -1
 	return clampi(floori(point.x / 96.0), 0, TAB_NAMES.size() - 1)
@@ -1927,15 +2104,16 @@ func press_home(point: Vector2) -> void:
 		ship_drawer = false
 		return
 	var tab := tab_at(point)
+	var high := point - Vector2(0, menu_shift_top())
 	if tab >= 0:
 		activate_tab(tab)
 	elif LAUNCH.grow(8).has_point(point):
 		start_run()
-	elif HOME_SETTINGS.has_point(point):
+	elif HOME_SETTINGS.has_point(high):
 		open_settings()
-	elif HOME_PERKS.has_point(point):
+	elif HOME_PERKS.has_point(high):
 		open_perks()
-	elif HOME_OFFLINE.has_point(point) and meta.offline_pending > 0:
+	elif HOME_OFFLINE.has_point(high) and meta.offline_pending > 0:
 		metal += meta.collect_offline()
 		save_dock()
 		sound.play_cue("coin")

@@ -1,8 +1,12 @@
 extends Node2D
 
-const ARENA := Rect2(23, 132, 434, 740)
-# Top of the zone the ship can move in.
-const PILOT_TOP := 470.0
+# World-space play field. Width is fixed; the height follows the screen so tall phones get
+# a taller sea instead of empty bands (set by the layout).
+var ARENA := Rect2(23, 132, 434, 740)
+# One texel of the blocky interface: borders and bevels are multiples of this.
+const PX := 3.0
+# Neutral block colour for plain buttons, a cool stone grey.
+const STONE := Color("#6b6880")
 # Saturated arcade palette: enemies lean violet/pink, the player cyan, rewards gold, damage pink.
 const INK := Color("#170b2e")
 const PANEL := Color("#2b1f5c")
@@ -25,9 +29,6 @@ var interface_opacity := 1.0
 var interface_origin := Vector2.ZERO
 var interface_press := Vector2.INF
 var interface_pressure := 0.0
-var interface_box := StyleBoxFlat.new()
-var button_box := StyleBoxFlat.new()
-var shadow_box := StyleBoxFlat.new()
 # Every sprite with a one-pixel ink outline baked in, built once at start-up.
 var sprites := {}
 const WATER := preload("res://assets/backgrounds/battle_sea.png")
@@ -62,12 +63,6 @@ const SPRITES := {
 func setup_art() -> void:
 	art_font.base_font = ART_FONT
 	art_font.fallbacks = [UI_GLYPHS]
-	for box in [interface_box, button_box, shadow_box]:
-		box.set_corner_radius_all(10)
-		box.anti_aliasing = false
-	interface_box.set_border_width_all(3)
-	button_box.set_border_width_all(3)
-	shadow_box.bg_color = INK
 	texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
 	for name in SPRITES:
 		sprites[name] = outlined(SPRITES[name])
@@ -112,40 +107,63 @@ func words(value: String, position: Vector2, size: int, color := CREAM, centered
 			maxi(4, size / 5), Color(INK, alpha))
 	draw_string(art_font, position.round(), value, HORIZONTAL_ALIGNMENT_LEFT, -1, size, Color(color, alpha))
 
-# Flat chunky block: ink border and a solid drop shadow.
-func tile_solid(rect: Rect2, fill: Color) -> void:
-	var alpha := interface_opacity
-	draw_rect(Rect2(rect.position + Vector2(0, 4), rect.size).grow(2), Color(INK, alpha))
-	draw_rect(rect.grow(2), Color(INK, alpha))
-	draw_rect(rect, Color(fill, fill.a * alpha))
+# Blocky bevelled box in the style of voxel-game menus: black outline, light top-left edge,
+# dark bottom-right edge, square corners. Sunken swaps the edges.
+func bevel(rect: Rect2, fill: Color, sunken := false, speckle := false) -> void:
+	var alpha := interface_opacity * fill.a
+	var light := Color(fill.lightened(0.42), alpha)
+	var dark := Color(fill.darkened(0.5), alpha)
+	if sunken:
+		var swap := light
+		light = dark
+		dark = swap
+	rect = Rect2(rect.position.round(), rect.size.round())
+	draw_rect(rect.grow(PX), Color(INK, interface_opacity))
+	draw_rect(rect, Color(fill, alpha))
+	if speckle:
+		# A sparse fixed dither so large faces read as a textured block, not a flat fill.
+		var cells := Vector2i(int(rect.size.x / (PX * 2)), int(rect.size.y / (PX * 2)))
+		for i in range(mini(48, cells.x * cells.y / 5)):
+			var cell := Vector2i((i * 37 + 11) % maxi(1, cells.x), (i * 23 + 5) % maxi(1, cells.y))
+			var spot := rect.position + Vector2(cell) * PX * 2 + Vector2(PX, PX)
+			var tone := fill.darkened(0.16) if i % 3 else fill.lightened(0.12)
+			draw_rect(Rect2(spot, Vector2(PX, PX)), Color(tone, alpha))
+	draw_rect(Rect2(rect.position, Vector2(rect.size.x, PX)), light)
+	draw_rect(Rect2(rect.position, Vector2(PX, rect.size.y)), light)
+	draw_rect(Rect2(rect.position.x, rect.end.y - PX * 2, rect.size.x, PX * 2), dark)
+	draw_rect(Rect2(rect.end.x - PX, rect.position.y, PX, rect.size.y), dark)
 
+# Small square block (badges, pills, counters).
+func tile_solid(rect: Rect2, fill: Color) -> void:
+	bevel(rect, fill)
+
+# Panel behind dialogs and cards.
 func tile(rect: Rect2, fill: Color, _border: Color) -> void:
-	shadow_box.bg_color = Color(INK, interface_opacity)
-	draw_style_box(shadow_box, Rect2(rect.position + Vector2(0, 6), rect.size))
-	interface_box.bg_color = Color(fill, fill.a * interface_opacity)
-	interface_box.border_color = Color(INK, interface_opacity)
-	draw_style_box(interface_box, rect)
+	bevel(rect, fill)
 
 func press_amount(rect: Rect2) -> float:
 	return interface_pressure if rect.has_point(interface_press - interface_origin) else 0.0
 
 func press_tile(rect: Rect2, fill: Color, accent: Color, amount := -1.0) -> Rect2:
 	var pressure := press_amount(rect) if amount < 0 else amount
-	# Chunky key: solid ink shadow underneath; pressing sinks the face onto it.
-	shadow_box.bg_color = Color(INK, interface_opacity)
-	draw_style_box(shadow_box, Rect2(rect.position + Vector2(0, 5), rect.size))
-	rect.position.y += 4 * pressure
-	var face := fill.lerp(accent, 0.12).lightened(0.08 * pressure)
-	button_box.bg_color = Color(face, fill.a * interface_opacity)
-	button_box.border_color = Color(INK, interface_opacity)
-	draw_style_box(button_box, rect)
-	draw_rect(Rect2(rect.position + Vector2(10, 5), Vector2(rect.size.x - 20, 3)),
-		Color(1, 1, 1, 0.16 * interface_opacity))
+	# Dark neutral fills become stone blocks; coloured buttons keep their colour.
+	var face := STONE.lerp(accent, 0.16) if fill.get_luminance() < 0.2 and fill.a > 0.95 else fill.lerp(accent, 0.1)
+	face.a = fill.a
+	var sunken := pressure > 0.5
+	if sunken:
+		rect.position += Vector2(0, PX)
+		face = face.darkened(0.08)
+	bevel(rect, face, sunken, rect.size.x * rect.size.y > 9000)
 	return rect
 
 func button(rect: Rect2, title: String, color: Color) -> void:
 	var face := press_tile(rect, color, color)
-	words(title, face.get_center() + Vector2(0, 9), 26, INK, true)
+	caption(title, face.get_center() + Vector2(0, 9), 26)
+
+# Button caption: cream text with a hard one-texel drop shadow.
+func caption(title: String, position: Vector2, size: int, color := CREAM) -> void:
+	words(title, position + Vector2(PX, PX), size, Color(INK, 0.9), true)
+	words(title, position, size, color, true)
 
 func place_interface(origin: Vector2) -> void:
 	interface_origin = origin
@@ -221,6 +239,25 @@ func draw_enemy(enemy: Dictionary, sector: int, time: float) -> void:
 	if enemy.flash > 0.04:
 		# Modulate above 1 pushes every lit texel to white: a one-beat hit silhouette.
 		pixel_sprite(sprite, pos, size, Color(6, 6, 6, 0.9), stretch)
+	var skill: String = enemy.get("skill", "")
+	var badge := pos + Vector2(-size * 5 - 4, -size * 5 + 2)
+	if skill in ["heal", "both"]:
+		# Healers wear a green cross and a slow pulsing aura.
+		var pulse := 0.5 + 0.5 * sin(time * 4 + float(enemy.phase))
+		draw_rect(Rect2(pos - Vector2(19, 19) * size / 3.0, Vector2(38, 38) * size / 3.0), Color(MINT, 0.10 + 0.08 * pulse))
+		draw_rect(Rect2(badge - Vector2(6, 6), Vector2(12, 12)), INK)
+		draw_rect(Rect2(badge - Vector2(4, 1.5), Vector2(8, 3)), MINT)
+		draw_rect(Rect2(badge - Vector2(1.5, 4), Vector2(3, 8)), MINT)
+		badge.x += 14
+	if skill in ["dodge", "both"]:
+		# Dodgers show a cyan double chevron; it greys out while the dodge recharges.
+		var ready: bool = enemy.get("dodge_cd", 0.0) <= 0
+		var tone := SKY if ready else STEEL
+		draw_rect(Rect2(badge - Vector2(6, 6), Vector2(12, 12)), INK)
+		for step in [-2, 2]:
+			draw_rect(Rect2(badge + Vector2(step - 2, -3), Vector2(2, 2)), tone)
+			draw_rect(Rect2(badge + Vector2(step, -1), Vector2(2, 2)), tone)
+			draw_rect(Rect2(badge + Vector2(step - 2, 1), Vector2(2, 2)), tone)
 	if kind != 3 and enemy.hp < enemy.max_hp:
 		var bar_width := 38 if kind == 4 else 28
 		gauge(Rect2(pos.x - bar_width / 2.0, pos.y - size * 5 - 5, bar_width, 3),
