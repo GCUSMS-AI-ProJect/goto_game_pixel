@@ -3,7 +3,7 @@ extends "res://scripts/visuals/chart_art.gd"
 const AudioDirector = preload("res://scripts/audio/audio_director.gd")
 const BattleLayout = preload("res://scripts/ui/battle_layout.gd")
 const SAVE = "user://dock.cfg"
-const PILOT_AREA = Rect2(40, 447, 400, 254)
+const PILOT_AREA = Rect2(40, PILOT_TOP, 400, 372)
 const LAUNCH = Rect2(36, 739, 408, 67)
 const PAUSE_BUTTONS = [Rect2(47, 362, 386, 62), Rect2(47, 437, 386, 62), Rect2(47, 512, 386, 62)]
 const MOTION_OPTION = Rect2(49, 492, 382, 54)
@@ -84,7 +84,7 @@ var chart_last_point := Vector2.ZERO
 var ship_drawer := false
 var ship_slide := 0.0
 var dock_port := 0
-var pilot := Vector2(240, 655)
+var pilot := Vector2(240, 760)
 var movement := Vector2.ZERO
 var touch_vector := Vector2.ZERO
 var touch_origin := Vector2.ZERO
@@ -338,7 +338,7 @@ func improve_facility(kind: int) -> void:
 func start_run() -> void:
 	ship_drawer = false
 	ship_slide = 0
-	pilot = Vector2(240, 650)
+	pilot = Vector2(240, 760)
 	max_hp = 100 + 15 * buildings[0] - 15 * pilot_type
 	hp = max_hp
 	xp = 0
@@ -497,7 +497,7 @@ func begin_battle_press(pointer: int, point: Vector2) -> void:
 	var control := battle_layout.control_at(point)
 	if control >= 0 and (control != BattleLayout.Action.UPGRADE or upgrade_points > 0):
 		control_presses[pointer] = {"control": control, "origin": point}
-	elif arena_pointer == NO_POINTER and battle_layout.arena.has_point(point):
+	elif arena_pointer == NO_POINTER and point.y > battle_layout.hud.end.y:
 		arena_pointer = pointer
 		arena_down = point
 		touch_origin = battle_layout.inverse_world * point
@@ -514,10 +514,6 @@ func move_battle_press(pointer: int, point: Vector2) -> void:
 
 func end_battle_press(pointer: int, point: Vector2, canceled := false) -> void:
 	if pointer == arena_pointer:
-		var world_point := battle_layout.inverse_world * point
-		if not canceled and not arena_dragged and point.distance_to(arena_down) < DRAG_THRESHOLD \
-				and battle_layout.arena.has_point(point) and world_point.y < PILOT_AREA.position.y:
-			aim_point = world_point
 		arena_pointer = NO_POINTER
 		arena_dragged = false
 		touch_vector = Vector2.ZERO
@@ -1419,6 +1415,8 @@ func _draw() -> void:
 		draw_combat_effect(effect)
 	draw_at_world_point(pilot, world, sprite_scale)
 	draw_pilot(pilot, pilot_type, movement, armor_time, clock, ship_fittings(true))
+	draw_ball_orbit(world)
+	draw_at_world_point(pilot, world, sprite_scale)
 	if muzzle_time > 0:
 		var muzzle := (pilot + shot_heading * (18 + (0.1 - muzzle_time) * 92)).snapped(Vector2(2, 2))
 		var size := Vector2.ONE * (3 + muzzle_time * 55)
@@ -1429,6 +1427,7 @@ func _draw() -> void:
 	if screen_flash > 0:
 		draw_rect(battle_layout.arena, Color(1, 1, 1, minf(0.85, screen_flash * 2)))
 	mask_arena()
+	draw_low_health()
 	draw_battle_hud(boss_hp)
 	draw_battle_controls()
 	if mode == "level":
@@ -1455,47 +1454,148 @@ func mask_arena() -> void:
 func draw_battle_hud(boss_hp: float) -> void:
 	var hud := battle_layout.hud
 	var origin := hud.position
-	words(SEA_NAMES[sector], origin + Vector2(0, 25), 25)
-	var searching := score_scene() == AudioDirector.Scene.SEARCH
-	var phase := "巡航搜索" if searching else "第 %d/%d 波" % [wave, WAVES.size()]
-	if boss_hp >= 0:
-		phase = ("断链巨鳐" if sector == 0 else "沉舰看守") if wave_banner > 0 else "首领战"
-	words(phase, origin + Vector2(1, 49), 15, SKY if searching else GOLD)
-	words("%02d:%02d" % [floori(elapsed / 60.0), floori(fmod(elapsed, 60.0))],
-		origin + Vector2(hud.size.x * 0.5, 30), 23, CREAM, true)
-	if not boss_spawned:
-		var seconds := maxi(0, ceili(next_wave_at() - elapsed))
-		var countdown := "下波 %d · %02d秒" % [wave + 1, seconds] if wave < WAVES.size() else "首领 · %02d秒" % seconds
-		words(countdown, origin + Vector2(hud.size.x * 0.5, 51), 13, GOLD if seconds <= 3 else MIST, true)
 	var pause := battle_layout.controls[BattleLayout.Action.PAUSE]
+	# Level badge.
+	var badge := Rect2(origin, Vector2(40, 40))
+	tile_solid(badge, GOLD)
+	words(str(level), badge.get_center() + Vector2(0, 8), 22, INK, true)
+	# Hull bar with XP strip underneath.
+	var coin_width := 92.0
+	var bar := Rect2(origin + Vector2(48, 4), Vector2(pause.position.x - origin.x - 48 - coin_width - 14, 24))
+	var health := float(maxi(0, hp)) / max_hp
+	draw_rect(bar.grow(2), INK)
+	draw_rect(bar, Color(CORAL, 0.25))
+	draw_rect(Rect2(bar.position, Vector2(roundf(bar.size.x * health), bar.size.y)), CORAL)
+	draw_rect(Rect2(bar.position, Vector2(roundf(bar.size.x * health), 5)), Color(1, 1, 1, 0.3))
+	words("%d/%d" % [maxi(0, hp), max_hp], bar.get_center() + Vector2(0, 7), 17, CREAM, true)
+	var experience := Rect2(bar.position + Vector2(0, bar.size.y + 5), Vector2(bar.size.x, 5))
+	draw_rect(experience.grow(1), INK)
+	draw_rect(Rect2(experience.position, Vector2(roundf(experience.size.x * float(xp) / xp_needed()), 5)), MINT)
+	# Scrap collected this run.
+	var coins := Rect2(Vector2(bar.end.x + 10, origin.y + 4), Vector2(coin_width, 30))
+	tile_solid(coins, INK)
+	pixel_sprite("scrap", coins.position + Vector2(17, 15), 2)
+	words(str(earned), Vector2(coins.end.x - 10, coins.get_center().y + 7), 18, GOLD, false, true)
+	# Pause.
 	var pressed := control_is_pressed(BattleLayout.Action.PAUSE)
-	pause = press_tile(pause, PANEL, STEEL, float(pressed))
+	var face := press_tile(pause, PANEL, STEEL, float(pressed))
 	for offset in [-7, 3]:
-		draw_rect(Rect2(pause.get_center() + Vector2(offset, -9), Vector2(4, 18)), CREAM)
-	var rank := battle_layout.controls[BattleLayout.Action.UPGRADE]
-	var health := Rect2(Vector2(origin.x, rank.position.y), Vector2(rank.position.x - origin.x - 15, rank.size.y))
-	tile(health, PANEL, STEEL)
-	words("船体 %d/%d" % [maxi(0, hp), max_hp], health.position + Vector2(10, 22), 17, CREAM)
-	gauge(Rect2(health.position + Vector2(10, 31), Vector2(health.size.x - 20, 5)), float(hp) / max_hp, CORAL)
-	draw_upgrade_control(rank)
-	if boss_hp >= 0:
-		gauge(Rect2(origin + Vector2(0, 111), Vector2(hud.size.x, 5)), boss_hp, GOLD)
-	else:
-		draw_rect(Rect2(origin + Vector2(0, 112), Vector2(hud.size.x, 1)), STEEL)
-	draw_combo(hud, pause.position.x)
+		draw_rect(Rect2(face.get_center() + Vector2(offset, -9), Vector2(4, 18)), CREAM)
+	draw_progress(boss_hp)
+	draw_combo()
+	draw_wave_banner()
 
-func draw_upgrade_control(rank: Rect2) -> void:
-	var ready := upgrade_points > 0
-	var held := control_is_pressed(BattleLayout.Action.UPGRADE)
-	var face := press_tile(rank, PANEL.lerp(MINT, 0.13) if ready else PANEL, MINT if ready else STEEL, float(held))
-	words("强化等级", face.position + Vector2(9, 23), 13, CREAM if ready else MIST)
-	draw_level_stars(face.position + Vector2(67, 18), level, 6, 3.1, 8)
-	gauge(Rect2(face.position + Vector2(9, 32), Vector2(face.size.x - 18, 4)), float(xp) / xp_needed(), MINT)
-	if ready:
-		var dot := battle_layout.upgrade_badge + face.position - rank.position
-		draw_circle(dot + Vector2(0, 2), 13, Color("#080a15"), true, -1, true)
-		draw_circle(dot, 12, Color("#cf293e"), true, -1, true)
-		words(str(upgrade_points), dot + Vector2(0, 5), 14, Color.WHITE, true)
+# Run progress to the boss; turns into the boss health bar once it arrives.
+func draw_progress(boss_hp: float) -> void:
+	var rect := battle_layout.progress
+	draw_rect(rect.grow(2), INK)
+	if boss_hp >= 0:
+		draw_rect(rect, Color(CORAL, 0.25))
+		draw_rect(Rect2(rect.position, Vector2(roundf(rect.size.x * boss_hp), rect.size.y)), CORAL)
+		words("首领 %d%%" % ceili(boss_hp * 100), rect.get_center() + Vector2(0, 6), 14, CREAM, true)
+		return
+	draw_rect(rect, PANEL)
+	var reach := clampf(elapsed / BOSS_ARRIVAL, 0, 1)
+	draw_rect(Rect2(rect.position, Vector2(roundf((rect.size.x - 12) * reach), rect.size.y)), GOLD)
+	for entry in WAVES:
+		var x := rect.position.x + (rect.size.x - 12) * float(entry[0]) / BOSS_ARRIVAL
+		draw_rect(Rect2(x, rect.position.y, 2, rect.size.y), Color(INK, 0.6))
+	var elite_x := rect.position.x + (rect.size.x - 12) * ELITE_ARRIVAL / BOSS_ARRIVAL
+	draw_rect(Rect2(elite_x - 4, rect.position.y - 3, 8, rect.size.y + 6), LILAC if not elite_spawned else STEEL)
+	var skull := Rect2(rect.end.x - 20, rect.position.y - 6, 24, 24)
+	tile_solid(skull, CORAL)
+	words("王", skull.get_center() + Vector2(0, 6), 15, CREAM, true)
+
+func draw_combo() -> void:
+	if combo_hits < 2 or combo_time <= 0:
+		return
+	var age := CHAIN_WINDOW - combo_time
+	var opacity := clampf(1.0 - (age - 0.26) / 0.66, 0, 1)
+	if opacity <= 0:
+		return
+	var accent := combo_emphasis > 0
+	# Colour climbs every 10 hits so long chains look different at a glance.
+	var tiers := [MINT, SKY, GOLD, PEACH, CORAL]
+	var tier: Color = tiers[mini(floori(combo_hits / 10.0), tiers.size() - 1)]
+	var color := Color(GOLD if accent else tier, opacity)
+	var arena := battle_layout.arena
+	var anchor := Vector2(arena.end.x - 14, arena.position.y + 46)
+	var size := roundi((34.0 if accent else 30.0) * (1.0 + combo_pop * 0.3) + minf(10, combo_hits / 8.0))
+	words("×%d" % combo_hits, anchor, size, color, false, true)
+	words("连击", anchor + Vector2(0, 20), 14, Color(CREAM, opacity), false, true)
+
+func draw_wave_banner() -> void:
+	if wave_banner <= 0:
+		return
+	var arena := battle_layout.arena
+	var boss := boss_spawned
+	var total := 3.0 if boss else 2.0
+	var age := total - wave_banner
+	var pop := 1.0 + maxf(0, 0.35 - age) * 1.6
+	if reduced_fx:
+		pop = 1.0
+	var opacity := clampf(wave_banner / 0.4, 0, 1)
+	var text := "首领来袭！" if boss else "第 %d 波" % wave
+	var color := CORAL if boss else GOLD
+	words(text, Vector2(arena.get_center().x, arena.position.y + arena.size.y * 0.3), roundi(44 * pop),
+		Color(color, opacity), true)
+
+func control_is_pressed(control: int) -> bool:
+	for pending in control_presses.values():
+		if pending.control == control:
+			return true
+	return false
+
+func draw_battle_controls() -> void:
+	var rect := battle_layout.controls[BattleLayout.Action.DASH]
+	var ready := charges > 0 and dash_time <= 0
+	var held: bool = control_is_pressed(BattleLayout.Action.DASH) or control_feedback[BattleLayout.Action.DASH] > 0
+	var sink := 4.0 if held else 0.0
+	var center := rect.get_center()
+	var radius := rect.size.x * 0.5
+	draw_circle(center + Vector2(0, 5), radius, INK, true, -1, true)
+	var face := center + Vector2(0, sink)
+	draw_circle(face, radius, INK, true, -1, true)
+	draw_circle(face, radius - 4, SKY if ready else STEEL, true, -1, true)
+	draw_circle(face + Vector2(0, -6), radius - 14, Color(1, 1, 1, 0.18), true, -1, true)
+	if charges < max_charges:
+		draw_arc(face, radius - 4, -PI * 0.5, -PI * 0.5 + TAU * recharge / 4.5, 32, GOLD, 5, true)
+	words("闪避", face + Vector2(0, 9), 24, INK if ready else MIST, true)
+	var pip := face + Vector2(radius * 0.7, -radius * 0.7)
+	draw_circle(pip, 14, INK, true, -1, true)
+	draw_circle(pip, 11, GOLD, true, -1, true)
+	words(str(charges), pip + Vector2(0, 6), 16, INK, true)
+
+# Equipped ball types circle the ship instead of filling a bar at the bottom.
+func draw_ball_orbit(world: Transform2D) -> void:
+	var equipped: Array[int] = []
+	for kind in range(modules.size()):
+		if modules[kind] > 0:
+			equipped.append(kind)
+	if equipped.is_empty():
+		return
+	draw_set_transform_matrix(world)
+	for index in range(equipped.size()):
+		var angle := clock * 2.2 + TAU * index / equipped.size()
+		var point := (pilot + Vector2.from_angle(angle) * Vector2(34, 26)).snapped(Vector2(2, 2))
+		var color: Color = CHOICES[equipped[index]][2]
+		draw_rect(Rect2(point - Vector2(6, 6), Vector2(12, 12)), INK)
+		draw_rect(Rect2(point - Vector2(4, 4), Vector2(8, 8)), color)
+		draw_rect(Rect2(point - Vector2(2, 3), Vector2(3, 3)), Color(1, 1, 1, 0.7))
+
+func draw_low_health() -> void:
+	var share := float(hp) / max_hp
+	if share > 0.35 or hp <= 0:
+		return
+	var pulse := 0.25 + 0.2 * (0.5 + 0.5 * sin(clock * (6 + (0.35 - share) * 20)))
+	var arena := battle_layout.arena
+	for band in range(4):
+		var depth := 6.0 + band * 6
+		var color := Color(CORAL, pulse * (1.0 - band * 0.22))
+		draw_rect(Rect2(arena.position, Vector2(arena.size.x, depth)), color)
+		draw_rect(Rect2(arena.position.x, arena.end.y - depth, arena.size.x, depth), color)
+		draw_rect(Rect2(arena.position, Vector2(depth, arena.size.y)), color)
+		draw_rect(Rect2(arena.end.x - depth, arena.position.y, depth, arena.size.y), color)
 
 func draw_level_stars(origin: Vector2, count: int, columns: int, radius: float, spacing: float) -> void:
 	var rows := ceili(float(count) / columns)
@@ -1509,31 +1609,10 @@ func draw_level_stars(origin: Vector2, count: int, columns: int, radius: float, 
 			vertices.append(center + Vector2.from_angle(tip * PI / 5 - PI * 0.5) * length)
 		draw_colored_polygon(vertices, Color(GOLD, interface_opacity))
 
-func draw_combo(hud: Rect2, right: float) -> void:
-	if combo_hits < 2 or combo_time <= 0:
-		return
-	var age := CHAIN_WINDOW - combo_time
-	var opacity := clampf(1.0 - (age - 0.26) / 0.66, 0, 1)
-	if opacity <= 0:
-		return
-	var accent := combo_emphasis > 0
-	# Colour climbs every 10 hits so long chains look different at a glance.
-	var tiers := [MINT, SKY, GOLD, PEACH, CORAL]
-	var tier: Color = tiers[mini(floori(combo_hits / 10.0), tiers.size() - 1)]
-	var color := Color(GOLD if accent else tier, opacity)
-	var center := Vector2(right - 52, hud.position.y + 49 - minf(7, age * 12))
-	if accent:
-		draw_rect(Rect2(center + Vector2(-45, -12), Vector2(4, 4)), color)
-		draw_rect(Rect2(center + Vector2(41, -12), Vector2(4, 4)), color)
-	var size := roundi((20.0 if accent else 17.0) * (1.0 + combo_pop * 0.3) + minf(6, combo_hits / 10.0))
-	var text := "%d 连击" % combo_hits
-	words(text, center + Vector2(1, 2), size, Color(INK, opacity), true)
-	words(text, center, size, color, true)
-
 func draw_course() -> void:
 	for lane in range(7):
 		var x := 90 + lane * 50
-		for row in range(9):
+		for row in range(13):
 			draw_rect(Rect2(x, 160 + row * 56, 2, 13), Color(MIST, 0.12))
 	if sector == 1:
 		var direction := 1 if floori(elapsed / 12.0) % 2 == 0 else -1
@@ -1557,71 +1636,6 @@ func draw_course() -> void:
 	if elapsed < SEARCH_INTRO:
 		var scan := elapsed / SEARCH_INTRO
 		draw_polyline(pixel_ring(pilot, 22 + scan * 101, 12), Color(SKY, 0.33 * (1 - scan)), 2)
-
-func control_is_pressed(control: int) -> bool:
-	for pending in control_presses.values():
-		if pending.control == control:
-			return true
-	return false
-
-func draw_battle_controls() -> void:
-	var recall_ready := recall_time <= 0 and not balls.is_empty()
-	var recall_status := "%.1f 秒" % recall_time if recall_time > 0 else ("可用" if recall_ready else "等待出球")
-	var dash_status := "%d/%d" % [charges, max_charges]
-	if charges == 0:
-		dash_status += "  %.1f 秒" % (4.5 - recharge)
-	draw_skill(BattleLayout.Action.AIM, "辅助瞄准", "自动瞄准" if aim_point == Vector2.ZERO else "恢复自动",
-		GOLD if aim_point != Vector2.ZERO else SKY, true)
-	draw_skill(BattleLayout.Action.RECALL, "召回", recall_status, SKY, recall_ready)
-	draw_skill(BattleLayout.Action.DASH, "闪避", dash_status, MINT, charges > 0 and dash_time <= 0)
-	var dash_rect := battle_layout.controls[BattleLayout.Action.DASH]
-	if charges < max_charges:
-		gauge(Rect2(dash_rect.position + Vector2(10, 59), Vector2(dash_rect.size.x - 20, 3)), recharge / 4.5, GOLD)
-	draw_ball_status()
-
-func draw_skill(control: int, title: String, status: String, accent: Color, available: bool) -> void:
-	var rect := battle_layout.controls[control]
-	var pressed := control_is_pressed(control)
-	var feedback: float = 0.7 if pressed else control_feedback[control] * 3
-	var fill := PANEL.lerp(accent, 0.19 if available else 0.02)
-	var face := press_tile(rect, fill, accent if available else STEEL, feedback)
-	var icons := ["crosshair", "recall", "dash"]
-	pixel_sprite(icons[control], face.get_center() + Vector2(-face.size.x * 0.33, -9), 2, accent)
-	words(title, face.get_center() + Vector2(8, -5), 18, CREAM, true)
-	words(status, face.get_center() + Vector2(0, 17), 14, accent if available else MIST, true)
-
-func draw_ball_status() -> void:
-	tile(battle_layout.ball_bar, PANEL, STEEL)
-	var counts := {}
-	for ball in balls:
-		counts[ball.kind] = counts.get(ball.kind, 0) + 1
-	var equipped: Array[int] = []
-	for kind in range(modules.size()):
-		if modules[kind] > 0:
-			equipped.append(kind)
-	draw_ball_slot(0, "主球", "%d/%d" % [core_capacity - int(counts.get(-1, 0)), core_capacity],
-		GOLD if surge_ready else PEACH)
-	for slot in range(1, BALL_SLOTS + 1):
-		if slot <= equipped.size():
-			var kind := equipped[slot - 1]
-			draw_ball_slot(slot, CHOICES[kind][0], "×%d" % counts.get(kind, 0), CHOICES[kind][2], modules[kind])
-		else:
-			draw_ball_slot(slot, "空槽", "—", MIST)
-
-func draw_ball_slot(index: int, label: String, quantity: String, color: Color, stars := 0) -> void:
-	var slot := battle_layout.ball_slot(index)
-	if index > 0:
-		draw_rect(Rect2(slot.position + Vector2(0, 7), Vector2(1, slot.size.y - 14)), STEEL)
-	var width := art_font.get_string_size(label, HORIZONTAL_ALIGNMENT_LEFT, -1, 14).x
-	var left := slot.get_center().x - (width + 13) * 0.5
-	var icon := Vector2(left + 4, slot.position.y + 15).round()
-	draw_rect(Rect2(icon - Vector2(4, 2), Vector2(8, 4)), color)
-	draw_rect(Rect2(icon - Vector2(2, 4), Vector2(4, 8)), color)
-	draw_rect(Rect2(icon - Vector2(1, 2), Vector2(2, 2)), CREAM)
-	words(label, Vector2(left + 13, slot.position.y + 20), 14, CREAM)
-	words(quantity, slot.get_center() + Vector2(20 if stars > 0 else 0, 15), 13, color, true)
-	if stars > 0:
-		draw_level_stars(slot.get_center() + Vector2(-21, 10), stars, 3, 3.7, 9)
 
 func harvest_rect(resource: int) -> Rect2:
 	return Rect2(36 + resource * 210, 267, 198, 110)

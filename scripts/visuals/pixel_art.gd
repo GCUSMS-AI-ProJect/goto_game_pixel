@@ -1,6 +1,8 @@
 extends Node2D
 
-const ARENA := Rect2(23, 132, 434, 588)
+const ARENA := Rect2(23, 132, 434, 740)
+# Top of the zone the ship can move in.
+const PILOT_TOP := 470.0
 const INK := Color("#0b1320")
 const PANEL := Color("#172638")
 const STEEL := Color("#344c62")
@@ -69,10 +71,20 @@ func pixel_sprite(name: String, position: Vector2, scale_factor: int, tint := Co
 	draw_texture_rect(texture, Rect2((position - size * 0.5).snapped(Vector2(2, 2)), size), false,
 		Color(tint, tint.a * interface_opacity))
 
-func words(value: String, position: Vector2, size: int, color := CREAM, centered := false) -> void:
+func words(value: String, position: Vector2, size: int, color := CREAM, centered := false, right := false) -> void:
+	var width := art_font.get_string_size(value, HORIZONTAL_ALIGNMENT_LEFT, -1, size).x
 	if centered:
-		position.x -= art_font.get_string_size(value, HORIZONTAL_ALIGNMENT_LEFT, -1, size).x * 0.5
+		position.x -= width * 0.5
+	elif right:
+		position.x -= width
 	draw_string(art_font, position.round(), value, HORIZONTAL_ALIGNMENT_LEFT, -1, size, Color(color, color.a * interface_opacity))
+
+# Flat chunky block: ink border and a solid drop shadow.
+func tile_solid(rect: Rect2, fill: Color) -> void:
+	var alpha := interface_opacity
+	draw_rect(Rect2(rect.position + Vector2(0, 4), rect.size).grow(2), Color(INK, alpha))
+	draw_rect(rect.grow(2), Color(INK, alpha))
+	draw_rect(rect, Color(fill, fill.a * alpha))
 
 func tile(rect: Rect2, fill: Color, border: Color) -> void:
 	interface_box.bg_color = Color(fill, fill.a * interface_opacity)
@@ -122,14 +134,12 @@ func draw_arena(time: float, region: int) -> void:
 	draw_rect(ARENA.grow(2), STEEL, false, 2)
 	var rail_color := LILAC if region == 1 else MINT
 	for x in [24, 451]:
-		draw_rect(Rect2(x, 136, 5, 579), Color(INK, 0.82))
-		for y in range(147, 710, 26):
+		draw_rect(Rect2(x, ARENA.position.y + 4, 5, ARENA.size.y - 9), Color(INK, 0.82))
+		for y in range(int(ARENA.position.y) + 15, int(ARENA.end.y) - 10, 26):
 			draw_rect(Rect2(x, y, 5, 9), Color(rail_color, 0.19))
 			draw_rect(Rect2(x, y, 5, 2), Color(rail_color, 0.36))
-	draw_rect(Rect2(23, 445, 434, 275), Color(MINT, 0.025))
 	for x in range(30, 455, 22):
-		draw_rect(Rect2(x, 445, 10, 2), Color(MINT, 0.23))
-		draw_rect(Rect2(x, 711, 11, 3), Color(CORAL, 0.56))
+		draw_rect(Rect2(x, ARENA.end.y - 9, 11, 3), Color(CORAL, 0.56))
 
 func enemy_tint(kind: int) -> Color:
 	match kind:
