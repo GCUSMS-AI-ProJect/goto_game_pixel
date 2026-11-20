@@ -9,6 +9,7 @@ const PAUSE_BUTTONS = [Rect2(47, 362, 386, 62), Rect2(47, 437, 386, 62), Rect2(4
 const MOTION_OPTION = Rect2(49, 492, 382, 54)
 const RESULT_DONE = Rect2(47, 668, 386, 52)
 const RESULT_AGAIN := Rect2(47, 590, 386, 66)
+const OPEN_CHEST := Rect2(103, 459, 274, 54)
 const RESULT_REVEAL_START := 0.19
 const RESULT_REVEAL_END := 0.62
 const HOME_SETTINGS = Rect2(424, 14, 44, 44)
@@ -46,6 +47,8 @@ const MAX_ENEMIES := 32
 # Battle speed while the upgrade cards are open.
 const LEVEL_SLOWMO := 0.2
 const ENTRY_SPEED := 128.0
+const SHIP_RADIUS := 13.0
+const RAM_DAMAGE := 12
 const VICTORY_SLOWMO := 1.1
 const SLOWMO_RATE := 0.3
 const SCRAP_CHIME_GAP := 0.5
@@ -842,6 +845,8 @@ func tick_battle(delta: float) -> void:
 	if hp <= 0:
 		finish(false)
 		return
+	if victory_time > 0:
+		return
 	shot_clock -= delta
 	if shot_clock <= 0 and active_cores() < core_capacity and enemies.any(enemy_in_play):
 		volley()
@@ -1043,7 +1048,11 @@ func update_enemies(delta: float) -> void:
 				enemy.skill_clock = 6.0 if kind == 3 else 3.4
 				heal_pulse(enemy)
 		if kind == 3:
-			enemy.pos.y = move_toward(enemy.pos.y, 345, delta * 42 * slow_factor)
+			var dive_clock := fposmod(elapsed - BOSS_ARRIVAL, 18.0)
+			var diving := dive_clock >= 5.0 and dive_clock < 12.0
+			var patrol_y := maxf(345.0, pilot_area().position.y + 100) if diving else 345.0
+			var speed := 42.0 if enemy.pos.y < 345.0 and not diving else 115.0
+			enemy.pos.y = move_toward(enemy.pos.y, patrol_y, delta * speed * slow_factor)
 			enemy.pos.x = 240 + sin(elapsed * 0.53) * (132 if sector == 0 else 95)
 			boss_clock -= delta
 			if boss_clock <= 0 and enemy.pos.y > 230:
@@ -1064,10 +1073,6 @@ func update_enemies(delta: float) -> void:
 				enemy.attack = 2.1
 				for offset in [-35, 0, 35]:
 					hazards.append({"pos": enemy.pos + Vector2(offset, 12), "vel": Vector2(0, 203)})
-			if enemy.pos.y > ARENA.end.y - 20:
-				enemies.remove_at(i)
-				hurt(24, true)
-				continue
 		else:
 			var drift := sin(elapsed * 2.4 + float(enemy.phase)) * (13 if kind == 1 else 0)
 			var speed: float = [27.0, 40.0, 23.0][kind]
@@ -1077,15 +1082,29 @@ func update_enemies(delta: float) -> void:
 				enemy.fired = true
 				var direction: Vector2 = enemy.pos.direction_to(pilot)
 				hazards.append({"pos": enemy.pos, "vel": direction * 195})
-			if enemy.pos.y > ARENA.end.y - 9:
-				enemies.remove_at(i)
-				hurt(5 if kind != 2 else 10, true)
-				continue
-		if pilot.distance_squared_to(enemy.pos) < pow(radius(kind) + 13, 2):
-			hurt(20 if kind != 1 else 13, false)
+		var body_radius := radius(kind)
+		if enemy.pos.y - body_radius > ARENA.end.y:
+			enemies.remove_at(i)
+			continue
+		var contact_distance := body_radius + SHIP_RADIUS
+		if armor_time <= 0 and pilot.distance_squared_to(enemy.pos) < contact_distance * contact_distance:
+			collide_with_ship(enemy, contact_distance)
+			if hp <= 0 or victory_time > 0:
+				return
 
-func hurt(amount: int, breach: bool) -> void:
-	if armor_time > 0 and not breach:
+func collide_with_ship(enemy: Dictionary, contact_distance: float) -> void:
+	var away := pilot.direction_to(enemy.pos)
+	if away == Vector2.ZERO:
+		away = Vector2.UP
+	var impact := pilot + away * SHIP_RADIUS
+	enemy.pos = pilot + away * (contact_distance + 4)
+	enemy.pos.x = clampf(enemy.pos.x, 42, 438)
+	emit_fx("hit", impact, PEACH, 0.22, 40, away)
+	hurt(13 if enemy.kind == 1 else 20)
+	damage_enemy(enemy, RAM_DAMAGE, PEACH)
+
+func hurt(amount: int) -> void:
+	if armor_time > 0:
 		return
 	hp = maxi(0, hp - amount)
 	armor_time = 0.8
@@ -1102,7 +1121,7 @@ func update_hazards(delta: float) -> void:
 		if not ARENA.has_point(shot.pos):
 			hazards.remove_at(i)
 		elif pilot.distance_squared_to(shot.pos) < 20.0 * 20.0:
-			hurt(15, false)
+			hurt(15)
 			hazards.remove_at(i)
 
 func enemy_in_play(enemy: Dictionary) -> bool:
@@ -1318,7 +1337,8 @@ func damage_enemy(enemy: Dictionary, power: int, color: Color = CREAM, heavy: bo
 	sound.play_cue("crush", 0.8 if enemy.kind >= 2 else 1.0)
 	sound.play_cue("thump", 0.9 if enemy.kind >= 2 else 1.0)
 	if enemy.kind == 3:
-		begin_victory(enemy.pos)
+		if hp > 0:
+			begin_victory(enemy.pos)
 		return
 	earned += [1, 1, 3, 0, 6][enemy.kind]
 	if enemy.kind == 4:
@@ -1340,6 +1360,8 @@ func drop_scrap(origin: Vector2, value: int) -> void:
 
 # Boss down: clear the field, flash, slow time, then show the result.
 func begin_victory(origin: Vector2) -> void:
+	if mode == "level":
+		close_upgrades()
 	for other in enemies:
 		emit_fx("break", other.pos, enemy_tint(other.kind), 0.5, 48)
 	enemies.clear()
@@ -1534,7 +1556,7 @@ func _draw() -> void:
 			boss_hp = float(enemy.hp) / enemy.max_hp
 	var world := battle_layout.world
 	draw_set_transform_matrix(world)
-	draw_arena(clock, sector)
+	draw_arena(0.0 if reduced_fx else clock, sector)
 	draw_course()
 	if impact_shake > 0 and not reduced_fx:
 		world.origin += world.basis_xform(Vector2(roundf(sin(clock * 73) * impact_shake),
@@ -1984,8 +2006,8 @@ func offline_rate() -> int:
 	return 6 + 3 * buildings[3]
 
 func draw_home() -> void:
-	# Sea and dock fill well past the design frame so tall phones show no edges.
-	draw_sea(Rect2(-240, -240, 960, 1340), clock, sector)
+	var sea_area := Rect2(layout_canvas.position - menu_origin(), layout_canvas.size)
+	draw_sea(sea_area, 0.0 if reduced_fx else clock * 0.5, sector)
 	# The pier starts a little lower on tall screens and its planks run down to the tab bar.
 	var low := menu_shift_bottom()
 	var pier := roundf(low * 0.35)
@@ -2001,7 +2023,8 @@ func draw_home() -> void:
 		var spread := fmod(clock * 22 + ring * 26, 78)
 		draw_polyline(pixel_ring(hull + Vector2(0, 52), 44 + spread, 16), Color(SEA_FOAM, 0.45 * (1 - spread / 78)), 3)
 	draw_ship(hull, pilot_type, 9, ship_fittings(false))
-	words("巡潮艇" if pilot_type == 0 else "疾燕", Vector2(240, 493), 26, CREAM, true)
+	var ship := press_tile(Rect2(145, 432, 190, 48), PANEL, SKY, press_amount(HOME_SHIP))
+	caption("巡潮艇  ▸" if pilot_type == 0 else "疾燕  ▸", ship.get_center() + Vector2(0, 8), 21)
 	# Top bar: captain level, resources, settings, pinned to the top edge.
 	place_interface(menu_origin() + Vector2(0, menu_shift_top()))
 	var avatar := Rect2(12, 14, 44, 44)
@@ -2032,10 +2055,8 @@ func draw_home() -> void:
 	if clock < chart_notice_time:
 		label = "通关盐雾海沟后解锁"
 	words(label, stage.get_center() + Vector2(0, 7), 18, GOLD, true)
-	# Launch: the biggest thing on screen, breathing.
-	var swell := 0.0 if reduced_fx else (0.5 + 0.5 * sin(clock * 4.5)) * 5
-	var launch := press_tile(LAUNCH.grow(swell), CORAL, CORAL)
-	words("出  航", launch.get_center() + Vector2(0, 15), 42, CREAM, true)
+	var launch := press_tile(LAUNCH, CORAL, CORAL)
+	caption("出  航", launch.get_center() + Vector2(0, 15), 42)
 	draw_tabs(2)
 	if ship_slide > 0:
 		draw_ship_drawer()
@@ -2046,8 +2067,9 @@ func draw_pill(rect: Rect2, sprite: String, count: int, color: Color) -> void:
 	words(str(count), Vector2(rect.end.x - 12, rect.get_center().y + 8), 20, color, false, true)
 
 func red_dot(center: Vector2) -> void:
-	draw_circle(center, 9, INK, true, -1, true)
-	draw_circle(center, 7, CORAL, true, -1, true)
+	center = center.round()
+	draw_rect(Rect2(center - Vector2(6, 3), Vector2(12, 6)), CORAL)
+	draw_rect(Rect2(center - Vector2(3, 6), Vector2(6, 12)), CORAL)
 
 func draw_tabs(active: int) -> void:
 	place_interface(menu_origin() + Vector2(0, menu_shift_bottom()))
@@ -2055,12 +2077,12 @@ func draw_tabs(active: int) -> void:
 	draw_rect(Rect2(-240, TAB_TOP, 960, 3), STEEL)
 	var icons := ["building0", "pilot", "arrow", "scrap", "gear"]
 	for index in range(TAB_NAMES.size()):
-		var center := Vector2(48 + index * 96, TAB_TOP + 26)
 		var on := index == active
-		if on:
-			draw_rect(Rect2(center.x - 40, TAB_TOP + 3, 80, 4), GOLD)
+		var cell := Rect2(4 + index * 96, TAB_TOP + 5, 88, 53)
+		var face := press_tile(cell, STEEL if on else PANEL, GOLD if on else STEEL)
+		var center := Vector2(face.get_center().x, face.position.y + 16)
 		pixel_sprite(icons[index], center, 3 if on else 2, Color.WHITE if on else Color(MIST, 0.8))
-		words(TAB_NAMES[index], center + Vector2(0, 32), 15, GOLD if on else MIST, true)
+		words(TAB_NAMES[index], center + Vector2(0, 26), 15, GOLD if on else MIST, true)
 		if index == 3 and meta.has_rewards():
 			red_dot(center + Vector2(18, -12))
 	place_interface(menu_origin())
@@ -2248,8 +2270,7 @@ func draw_results() -> void:
 	var opened := chest_progress()
 	draw_chest(Vector2(240, 380), chest_tier, opened)
 	if opened <= 0:
-		var pulse := 0 if reduced_fx else roundi(2 * sin(clock * 6))
-		words("点击开启宝箱", Vector2(240, 490), 22 + pulse, CREAM, true)
+		button(OPEN_CHEST, "开启宝箱", GOLD)
 	else:
 		interface_opacity = reveal * opened
 		draw_dock_resource(Rect2(47, 462, 184, 56), "iron", "铁料", last_reward + chest_metal, GOLD)

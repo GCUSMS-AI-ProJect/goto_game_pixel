@@ -3,10 +3,8 @@ extends Node2D
 # World-space play field. Width is fixed; the height follows the screen so tall phones get
 # a taller sea instead of empty bands (set by the layout).
 var ARENA := Rect2(23, 132, 434, 740)
-# One texel of the blocky interface: borders and bevels are multiples of this.
+# One texel of the interface.
 const PX := 3.0
-# Neutral block colour for plain buttons, a cool stone grey.
-const STONE := Color("#6b6880")
 # Saturated arcade palette: enemies lean violet/pink, the player cyan, rewards gold, damage pink.
 const INK := Color("#170b2e")
 const PANEL := Color("#2b1f5c")
@@ -19,9 +17,10 @@ const PEACH := Color("#ff9a3d")
 const CORAL := Color("#ff4f7a")
 const LILAC := Color("#b45cff")
 const SKY := Color("#3fe0ff")
-const SEA := Color("#1b5fd6")
-const SEA_DEEP := Color("#123c9c")
 const SEA_FOAM := Color("#7fd2ff")
+const SEA_LOOP_SECONDS := 24.0
+const OPEN_SEA := preload("res://assets/backgrounds/open_sea_tile.png")
+const FOAM_TILE := preload("res://assets/backgrounds/sea_foam_tile.png")
 const ART_FONT := preload("res://assets/fonts/outpost_sans.ttf")
 const UI_GLYPHS := preload("res://assets/fonts/outpost_sans_ui.ttf")
 var art_font := FontVariation.new()
@@ -31,7 +30,6 @@ var interface_press := Vector2.INF
 var interface_pressure := 0.0
 # Every sprite with a one-pixel ink outline baked in, built once at start-up.
 var sprites := {}
-const WATER := preload("res://assets/backgrounds/battle_sea.png")
 const HARBOR := preload("res://assets/backgrounds/harbor.png")
 const SPRITES := {
 	"pilot": preload("res://assets/sprites/ships/tide_patrol.png"),
@@ -107,27 +105,14 @@ func words(value: String, position: Vector2, size: int, color := CREAM, centered
 			maxi(4, size / 5), Color(INK, alpha))
 	draw_string(art_font, position.round(), value, HORIZONTAL_ALIGNMENT_LEFT, -1, size, Color(color, alpha))
 
-# Blocky bevelled box in the style of voxel-game menus: black outline, light top-left edge,
-# dark bottom-right edge, square corners. Sunken swaps the edges.
-func bevel(rect: Rect2, fill: Color, sunken := false, speckle := false) -> void:
+# Raised edge for panels and readouts.
+func bevel(rect: Rect2, fill: Color) -> void:
 	var alpha := interface_opacity * fill.a
 	var light := Color(fill.lightened(0.42), alpha)
 	var dark := Color(fill.darkened(0.5), alpha)
-	if sunken:
-		var swap := light
-		light = dark
-		dark = swap
 	rect = Rect2(rect.position.round(), rect.size.round())
 	draw_rect(rect.grow(PX), Color(INK, interface_opacity))
 	draw_rect(rect, Color(fill, alpha))
-	if speckle:
-		# A sparse fixed dither so large faces read as a textured block, not a flat fill.
-		var cells := Vector2i(int(rect.size.x / (PX * 2)), int(rect.size.y / (PX * 2)))
-		for i in range(mini(48, cells.x * cells.y / 5)):
-			var cell := Vector2i((i * 37 + 11) % maxi(1, cells.x), (i * 23 + 5) % maxi(1, cells.y))
-			var spot := rect.position + Vector2(cell) * PX * 2 + Vector2(PX, PX)
-			var tone := fill.darkened(0.16) if i % 3 else fill.lightened(0.12)
-			draw_rect(Rect2(spot, Vector2(PX, PX)), Color(tone, alpha))
 	draw_rect(Rect2(rect.position, Vector2(rect.size.x, PX)), light)
 	draw_rect(Rect2(rect.position, Vector2(PX, rect.size.y)), light)
 	draw_rect(Rect2(rect.position.x, rect.end.y - PX * 2, rect.size.x, PX * 2), dark)
@@ -146,14 +131,18 @@ func press_amount(rect: Rect2) -> float:
 
 func press_tile(rect: Rect2, fill: Color, accent: Color, amount := -1.0) -> Rect2:
 	var pressure := press_amount(rect) if amount < 0 else amount
-	# Dark neutral fills become stone blocks; coloured buttons keep their colour.
-	var face := STONE.lerp(accent, 0.16) if fill.get_luminance() < 0.2 and fill.a > 0.95 else fill.lerp(accent, 0.1)
-	face.a = fill.a
-	var sunken := pressure > 0.5
-	if sunken:
-		rect.position += Vector2(0, PX)
-		face = face.darkened(0.08)
-	bevel(rect, face, sunken, rect.size.x * rect.size.y > 9000)
+	var travel := roundf(PX * clampf(pressure, 0.0, 1.0))
+	rect = Rect2(rect.position.round(), rect.size.round())
+	var base := rect
+	rect.position.y += travel
+	var face := fill.lerp(accent, 0.22).lightened(0.11).darkened(0.10 * pressure)
+	var alpha := interface_opacity * fill.a
+	# One-texel corner steps and two solid bands give the button its shape and depth.
+	var band_width := rect.size.x - PX * 2
+	draw_rect(Rect2(base.position.x + PX, base.end.y, band_width, PX), Color(INK, 0.60 * alpha))
+	draw_rect(Rect2(rect.position.x + PX, rect.position.y, band_width, PX), Color(face.lightened(0.26), alpha))
+	draw_rect(Rect2(rect.position.x, rect.position.y + PX, rect.size.x, rect.size.y - PX * 3), Color(face, alpha))
+	draw_rect(Rect2(rect.position.x + PX, rect.end.y - PX * 2, band_width, PX * 2), Color(face.darkened(0.28), alpha))
 	return rect
 
 func button(rect: Rect2, title: String, color: Color) -> void:
@@ -194,23 +183,29 @@ func draw_arena(time: float, region: int) -> void:
 		draw_rect(Rect2(x, ARENA.end.y - 9, 11, 3), Color(CORAL, 0.56))
 
 func draw_sea(area: Rect2, time: float, region := 0) -> void:
-	var deep := Color("#3b1f9c") if region == 1 else SEA_DEEP
-	var top := Color("#5a34d6") if region == 1 else SEA
-	var bands := 8
-	for band in range(bands):
-		var y := area.position.y + area.size.y * band / bands
-		draw_rect(Rect2(area.position.x, y, area.size.x, area.size.y / bands + 1), top.lerp(deep, float(band) / bands))
-	draw_texture_rect(WATER, area, false, Color(0.75, 0.9, 1.0, 0.16))
-	# Swell lines drift down past the ship, which reads as sailing forward.
-	for i in range(22):
-		var x := area.position.x + fposmod(i * 67.0 + sin(i * 1.7) * 30, area.size.x - 40)
-		var y := area.position.y + fposmod(time * (38 + i % 5 * 9) + i * 97.0, area.size.y)
-		var width := 14 + i % 4 * 10
-		x = snappedf(x, 2)
-		y = snappedf(y, 2)
-		draw_rect(Rect2(x, y, width, 3), Color(SEA_FOAM, 0.22 + 0.08 * (i % 3)))
-		if i % 4 == 0:
-			draw_rect(Rect2(x + snappedf(width * 0.3, 2), y + 5, 4, 2), Color(1, 1, 1, 0.35))
+	var phase := fposmod(time, SEA_LOOP_SECONDS) / SEA_LOOP_SECONDS
+	var sway := sin(phase * TAU)
+	var swell := Vector2(9.0 * sway, phase * OPEN_SEA.get_height()).round()
+	var foam := Vector2(-15.0 * sway, phase * FOAM_TILE.get_height() * 2.0).round()
+	var water_tint := Color(2.25, 0.55, 1.12) if region == 1 else Color.WHITE
+	var foam_tint := Color(1.0, 0.67, 1.0) if region == 1 else Color.WHITE
+	draw_sea_layer(OPEN_SEA, area, swell, water_tint)
+	draw_sea_layer(FOAM_TILE, area, foam, foam_tint)
+
+func draw_sea_layer(texture: Texture2D, area: Rect2, offset: Vector2, tint: Color) -> void:
+	var texture_size := texture.get_size()
+	var tile_size := texture_size * PX
+	var wrapped := Vector2(fposmod(offset.x, texture_size.x), fposmod(offset.y, texture_size.y))
+	var first := area.position - tile_size + wrapped * PX
+	var columns := ceili((area.end.x - first.x) / tile_size.x)
+	var rows := ceili((area.end.y - first.y) / tile_size.y)
+	for row in range(rows):
+		for column in range(columns):
+			var origin := first + Vector2(column, row) * tile_size
+			var visible := Rect2(origin, tile_size).intersection(area)
+			if visible.has_area():
+				var source := Rect2((visible.position - origin) / PX, visible.size / PX)
+				draw_texture_rect_region(texture, visible, source, tint)
 
 func enemy_tint(kind: int) -> Color:
 	match kind:
