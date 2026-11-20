@@ -4,7 +4,7 @@
 
 ## 运行游戏
 
-用 Godot 4.7.2 导入根目录的 `project.godot`，按 `F5` 启动。手机端拖动屏幕控制舰艇，桌面端可用鼠标拖动。战斗中通过界面按钮辅助瞄准、召回或闪避。
+用 Godot 4.7.2 导入根目录的 `project.godot`，按 `F5` 启动。在战斗区任意位置按住拖动即可操控舰艇（相对拖动，手指不会挡住舰艇），桌面端可用鼠标或 WASD。瞄准和弹球回收自动进行，右下角圆形按钮闪避（桌面端空格）。升级时战斗放慢，点一张卡立即生效（桌面端 1/2/3）。
 
 Android 试玩包和 Windows x86-64 版在 [GitHub Releases](https://github.com/GCUSMS-AI-ProJect/goto_game_pixel/releases) 下载。
 
@@ -40,4 +40,4 @@ Android 试玩包使用调试签名。正式上架时需配置发布签名，并
 
 ## 界面预览
 
-<img src="docs/screenshots/nautical_chart.png" alt="航海图" width="225"> <img src="docs/screenshots/battle.png" alt="战斗" width="225"> <img src="docs/screenshots/harbor.png" alt="港口" width="225">
+<img src="docs/screenshots/home.png" alt="主页" width="225"> <img src="docs/screenshots/battle.png" alt="战斗" width="225"> <img src="docs/screenshots/harbor.png" alt="港口" width="225">

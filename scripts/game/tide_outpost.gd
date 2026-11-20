@@ -2,18 +2,27 @@ extends "res://scripts/visuals/chart_art.gd"
 
 const AudioDirector = preload("res://scripts/audio/audio_director.gd")
 const BattleLayout = preload("res://scripts/ui/battle_layout.gd")
+const MetaProgress = preload("res://scripts/game/meta_progress.gd")
 const SAVE = "user://dock.cfg"
 const PILOT_AREA = Rect2(40, PILOT_TOP, 400, 372)
-const LAUNCH = Rect2(36, 739, 408, 67)
+const LAUNCH = Rect2(60, 580, 360, 84)
 const PAUSE_BUTTONS = [Rect2(47, 362, 386, 62), Rect2(47, 437, 386, 62), Rect2(47, 512, 386, 62)]
 const MOTION_OPTION = Rect2(49, 492, 382, 54)
-const RESULT_DONE = Rect2(47, 545, 386, 59)
+const RESULT_DONE = Rect2(47, 668, 386, 52)
+const RESULT_AGAIN := Rect2(47, 590, 386, 66)
 const RESULT_REVEAL_START := 0.19
 const RESULT_REVEAL_END := 0.62
-const HOME_SETTINGS = Rect2(390, 57, 54, 51)
-const HOME_RECENTER := Rect2(390, 117, 54, 46)
-const HOME_PORT = Rect2(36, 654, 171, 65)
-const HOME_SHIP = Rect2(219, 654, 225, 65)
+const HOME_SETTINGS = Rect2(424, 14, 44, 44)
+const HOME_SHIP := Rect2(140, 290, 200, 190)
+const HOME_STAGE := Rect2(90, 518, 300, 42)
+const HOME_PERKS := Rect2(412, 76, 56, 56)
+const HOME_OFFLINE := Rect2(12, 142, 196, 44)
+const TAB_TOP := 790.0
+const TAB_NAMES := ["港口", "舰队", "出航", "福利", "设置"]
+const PERKS_SIGN := Rect2(60, 332, 360, 54)
+const PERKS_CLOSE := Rect2(60, 712, 360, 56)
+# Pages drawn on the menu canvas rather than over the battle.
+const MENU_PAGES := ["home", "dock", "perks"]
 const AUDIO_DONE = Rect2(49, 561, 382, 56)
 const DRAG_THRESHOLD := 12.0
 const NO_POINTER := -2
@@ -22,7 +31,6 @@ const CHAIN_WINDOW = 1.45
 const SURGE_HITS = 8
 const SEARCH_INTRO := 0.6
 const COMBAT_TAIL := 2.0
-const DOCK_EXIT := Rect2(36, 758, 408, 55)
 const BATCH_SIZE := 4
 const BATCH_INTERVAL := 1.3
 const ELITE_ARRIVAL := 52.0
@@ -167,11 +175,21 @@ var balls: Array[Dictionary] = []
 var hazards: Array[Dictionary] = []
 var pickups: Array[Dictionary] = []
 var sound := AudioDirector.new()
+var meta := MetaProgress.new()
+var chest_tier := 0
+var chest_metal := 0
+var chest_salt := 0
+var chest_open_time := -1.0
+var first_win_bonus := false
+var boss_left := -1.0
+var seconds_to_boss := 0.0
 
 func _ready() -> void:
 	setup_art()
 	rng.randomize()
 	load_dock()
+	meta.roll_day()
+	meta.accrue_offline(offline_rate())
 	add_child(sound)
 	refresh_layout()
 	get_viewport().size_changed.connect(refresh_layout)
@@ -198,12 +216,13 @@ func menu_origin() -> Vector2:
 	return (layout_canvas.get_center() - BattleLayout.DESIGN_SIZE * 0.5).floor()
 
 func settings_origin() -> Vector2:
-	return menu_origin() if settings_return == "home" else battle_layout.dialog_origin
+	return menu_origin() if settings_return in MENU_PAGES else battle_layout.dialog_origin
 
 func load_dock() -> void:
 	var config := ConfigFile.new()
 	if config.load(SAVE) != OK:
 		return
+	meta.load_from(config)
 	metal = maxi(0, int(config.get_value("dock", "metal", 0)))
 	wins = maxi(0, int(config.get_value("dock", "wins", 0)))
 	for i in range(buildings.size()):
@@ -243,6 +262,8 @@ func save_dock() -> void:
 	config.set_value("navigation", "sea", sector)
 	config.set_value("navigation", "port", dock_port)
 	config.set_value("navigation", "ship", pilot_type)
+	meta.last_seen = MetaProgress.now()
+	meta.save_to(config)
 	var result := config.save(SAVE)
 	if result != OK:
 		push_warning("Cannot save dock: %s" % error_string(result))
@@ -403,6 +424,10 @@ func clear_drag() -> void:
 	movement = Vector2.ZERO
 
 func _notification(what: int) -> void:
+	if what in [NOTIFICATION_WM_CLOSE_REQUEST, NOTIFICATION_APPLICATION_PAUSED]:
+		save_dock()
+	elif what == NOTIFICATION_APPLICATION_RESUMED:
+		meta.accrue_offline(offline_rate())
 	if what == NOTIFICATION_APPLICATION_FOCUS_OUT:
 		if mode in ["fight", "level"]:
 			mode = "pause"
@@ -426,7 +451,7 @@ func _input(event: InputEvent) -> void:
 			KEY_ESCAPE:
 				if mode == "settings":
 					mode = settings_return
-				elif mode == "dock":
+				elif mode in ["dock", "perks"]:
 					mode = "home"
 				elif mode == "home" and ship_drawer:
 					ship_drawer = false
@@ -439,8 +464,11 @@ func _input(event: InputEvent) -> void:
 			KEY_ENTER:
 				if mode == "home":
 					start_run()
-				elif mode in ["win", "loss"] and result_time >= RESULT_REVEAL_END:
-					mode = "dock"
+				elif mode in ["win", "loss"]:
+					if chest_open_time < 0:
+						press_results(Vector2.ZERO)
+					elif result_time - chest_open_time >= 0.4:
+						start_run()
 
 func handle_menu_pointer(event: InputEvent) -> bool:
 	if event is InputEventScreenTouch or (event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT):
@@ -463,12 +491,7 @@ func handle_menu_pointer(event: InputEvent) -> bool:
 			chart_dragging = false
 		return true
 	if (event is InputEventScreenDrag and event.index == menu_pointer) or (event is InputEventMouseMotion and menu_pointer == -1):
-		if mode == "home" and menu_press_page == "home" and not ship_drawer and CHART.has_point(menu_press_point - menu_origin()):
-			if chart_dragging or event.position.distance_to(menu_press_point) >= DRAG_THRESHOLD:
-				chart_dragging = true
-				chart_pan += event.position - chart_last_point
-				chart_last_point = event.position
-		elif event.position.distance_to(menu_press_point) >= DRAG_THRESHOLD:
+		if event.position.distance_to(menu_press_point) >= DRAG_THRESHOLD:
 			menu_pointer = NO_POINTER
 			menu_feedback = 0.0
 		return true
@@ -556,15 +579,15 @@ func toggle_pause() -> void:
 		mode = "fight"
 
 func press(point: Vector2) -> bool:
-	if mode in ["home", "dock"]:
+	if mode in MENU_PAGES:
 		point -= menu_origin()
 	match mode:
 		"home":
 			press_home(point)
 		"dock":
-			if DOCK_EXIT.has_point(point):
-				mode = "home"
-				play_sound(1)
+			var tab := tab_at(point)
+			if tab >= 0:
+				activate_tab(tab)
 			else:
 				for resource in range(2):
 					if harvest_rect(resource).has_point(point):
@@ -587,48 +610,11 @@ func press(point: Vector2) -> bool:
 				finish(false)
 		"settings":
 			change_audio(point - settings_origin())
+		"perks":
+			press_perks(point)
 		"win", "loss":
-			if result_time >= RESULT_REVEAL_END and RESULT_DONE.has_point(point - battle_layout.dialog_origin):
-				mode = "dock"
+			press_results(point)
 	return true
-
-func press_home(point: Vector2) -> void:
-	if ship_drawer:
-		for index in range(2):
-			if ship_option_rect(index).has_point(point):
-				if index == 0 or buildings[2] > 0:
-					pilot_type = index
-					ship_drawer = false
-					save_dock()
-					play_sound(1)
-				return
-		ship_drawer = false
-		return
-	if LAUNCH.has_point(point):
-		start_run()
-	elif HOME_SETTINGS.has_point(point):
-		open_settings()
-	elif HOME_RECENTER.has_point(point):
-		chart_pan = Vector2.ZERO
-	elif HOME_PORT.has_point(point):
-		enter_dock(dock_port)
-	elif HOME_SHIP.has_point(point):
-		ship_drawer = true
-		play_sound(1)
-	elif CHART.has_point(point):
-		var world_point := point - chart_pan.round()
-		for index in range(PORTS.size()):
-			if world_point.distance_to(PORTS[index]) <= 26:
-				enter_dock(index)
-				return
-		for index in range(REGION_TARGETS.size()):
-			if REGION_TARGETS[index].has_point(world_point):
-				if index == 0 or wins > 0:
-					sector = index
-					save_dock()
-					play_sound(1)
-				else:
-					chart_notice_time = clock + 3.0
 
 func enter_dock(index: int) -> void:
 	dock_port = index
@@ -754,7 +740,7 @@ func _physics_process(delta: float) -> void:
 	queue_redraw()
 
 func score_scene() -> AudioDirector.Scene:
-	if mode in ["home", "dock"] or (mode == "settings" and settings_return == "home"):
+	if mode in MENU_PAGES or (mode == "settings" and settings_return in MENU_PAGES):
 		return AudioDirector.Scene.PORT
 	if mode in ["win", "loss"]:
 		return AudioDirector.Scene.SEARCH
@@ -1320,9 +1306,24 @@ func choose(index: int) -> void:
 func finish(won: bool) -> void:
 	if mode not in ["fight", "pause", "level"]:
 		return
-	last_reward = floori(earned / 3.0) + (20 if won else 0) + floori(elapsed / 30.0)
+	# Runs now have several times more kills than before, so scrap converts at 1/8.
+	last_reward = floori(earned / 8.0) + (20 if won else 0) + floori(elapsed / 30.0)
+	first_win_bonus = meta.record_run(kills, best_combo, won)
+	if first_win_bonus:
+		last_reward *= 2
+	# Every run ends with a chest; a win gives the gold one.
+	chest_tier = 2 if won else (1 if elapsed >= 60 else 0)
+	chest_metal = [6, 12, 25][chest_tier] + rng.randi_range(0, 5)
+	chest_salt = [0, rng.randi_range(0, 1), 2][chest_tier]
+	chest_open_time = -1.0
+	boss_left = -1.0
+	for enemy in enemies:
+		if enemy.kind == 3:
+			boss_left = float(enemy.hp) / enemy.max_hp
+	seconds_to_boss = maxf(0, BOSS_ARRIVAL - elapsed)
 	last_salt_reward = 0
-	metal += last_reward
+	metal += last_reward + chest_metal
+	salt += chest_salt
 	if elapsed >= 12 or won:
 		sorties += 1
 		last_salt_reward = buildings[3] + int(won)
@@ -1363,15 +1364,17 @@ func _draw() -> void:
 	if menu_press_page == mode:
 		interface_pressure = 1.0 if menu_pointer != NO_POINTER else menu_feedback / 0.14
 	draw_rect(layout_canvas, INK)
-	if mode == "home" or (mode == "settings" and settings_return == "home"):
+	var page := settings_return if mode == "settings" else mode
+	if page in MENU_PAGES:
 		place_interface(menu_origin())
-		draw_home()
-		if mode == "settings":
+		if page == "dock":
+			draw_dock()
+		else:
+			draw_home()
+		if mode == "perks":
+			draw_perks()
+		elif mode == "settings":
 			draw_audio_settings()
-		return
-	if mode == "dock":
-		place_interface(menu_origin())
-		draw_dock()
 		return
 	var boss_hp := -1.0
 	for enemy in enemies:
@@ -1660,34 +1663,6 @@ func ship_fittings(in_battle: bool) -> Vector3i:
 func choice_rect(index: int) -> Rect2:
 	return Rect2(battle_layout.dialog_origin + Vector2(22 + index * 148, 318), Vector2(140, 236))
 
-func draw_home() -> void:
-	draw_chart(sector, wins > 0)
-	draw_dock_resource(Rect2(36, 57, 161, 51), "iron", "铁料", metal, GOLD)
-	draw_dock_resource(Rect2(206, 57, 161, 51), "salt", "晶盐", salt, SKY)
-	var settings_face := press_tile(HOME_SETTINGS, PANEL, STEEL)
-	pixel_sprite("gear", settings_face.get_center(), 3, CREAM)
-	words("航海图", Vector2(36, 148), 25, CREAM)
-	words("拖动海图 · 点选海域", Vector2(157, 147), 15, MIST)
-	var center_face := press_tile(HOME_RECENTER, PANEL, STEEL)
-	pixel_sprite("crosshair", center_face.get_center(), 3, SKY)
-	words(SEA_NAMES[sector], Vector2(37, 624), 20, MINT if sector == 0 else LILAC)
-	if clock < chart_notice_time:
-		words("通关盐雾海沟后解锁", Vector2(246, 624), 14, GOLD)
-	else:
-		words("断链巨鳐" if sector == 0 else "沉舰看守", Vector2(361, 624), 14, MIST, true)
-	var port_face := press_tile(HOME_PORT, PANEL, STEEL)
-	pixel_sprite("building0" if dock_port == 0 else "beacon", port_face.position + Vector2(26, 33), 2)
-	words(PORT_NAMES[dock_port], port_face.position + Vector2(51, 29), 16, CREAM)
-	words("可打捞 %d 次" % sweeps, port_face.position + Vector2(51, 49), 13, MINT)
-	var ship_face := press_tile(HOME_SHIP, PANEL, MINT if ship_drawer else STEEL)
-	draw_ship(ship_face.position + Vector2(31, 32), pilot_type, 2, ship_fittings(false))
-	words("巡潮艇" if pilot_type == 0 else "疾燕", ship_face.position + Vector2(62, 28), 18, CREAM)
-	words("选择舰艇", ship_face.position + Vector2(62, 49), 13, MIST)
-	pixel_sprite("arrow", ship_face.position + Vector2(200, 32), 2, MINT)
-	button(LAUNCH, "出航", MINT)
-	if ship_slide > 0:
-		draw_ship_drawer()
-
 func draw_ship_drawer() -> void:
 	var rise := Vector2(0, ship_drawer_offset())
 	draw_rect(Rect2(0, 177, 480, 475), Color(INK, 0.76 * ship_slide))
@@ -1731,7 +1706,7 @@ func draw_dock() -> void:
 		draw_facility(kind)
 	tile(Rect2(36, 676, 408, 52), PANEL, STEEL)
 	words(dock_note, Vector2(49, 706), 14, CREAM)
-	button(DOCK_EXIT, "返回航海图", MINT)
+	draw_tabs(0)
 
 func draw_facility(kind: int) -> void:
 	var rank := buildings[kind]
@@ -1834,6 +1809,244 @@ func draw_audio_settings() -> void:
 		motion_face.get_center() + Vector2(0, 6), 19, CREAM, true)
 	button(AUDIO_DONE, "完成", MINT)
 
+func captain_level() -> int:
+	return 1 + floori(sqrt(sorties * 1.5))
+
+func offline_rate() -> int:
+	return 6 + 3 * buildings[3]
+
+func draw_home() -> void:
+	# Sea and dock fill well past the design frame so tall phones show no edges.
+	draw_sea(Rect2(-240, -240, 960, 1340), clock, sector)
+	for plank in range(6):
+		var y := 686 + plank * 18
+		draw_rect(Rect2(-240, y, 960, 18), Color("#8a5a2b") if plank % 2 == 0 else Color("#7a4e24"))
+		for x in range(-240, 720, 64):
+			draw_rect(Rect2(x + (plank % 2) * 32, y, 3, 18), Color("#5e3a19"))
+	draw_rect(Rect2(-240, 680, 960, 6), INK)
+	var bob := 0.0 if reduced_fx else sin(clock * 1.8) * 6
+	var hull := Vector2(240, 375 + bob)
+	for ring in range(3):
+		var spread := fmod(clock * 22 + ring * 26, 78)
+		draw_polyline(pixel_ring(hull + Vector2(0, 52), 44 + spread, 16), Color(SEA_FOAM, 0.45 * (1 - spread / 78)), 3)
+	draw_ship(hull, pilot_type, 9, ship_fittings(false))
+	words("巡潮艇" if pilot_type == 0 else "疾燕", Vector2(240, 493), 26, CREAM, true)
+	# Top bar: captain level, resources, settings.
+	var avatar := Rect2(12, 14, 44, 44)
+	tile_solid(avatar, GOLD)
+	words(str(captain_level()), avatar.get_center() + Vector2(0, 9), 24, INK, true)
+	draw_pill(Rect2(66, 18, 160, 36), "iron", metal, GOLD)
+	draw_pill(Rect2(236, 18, 160, 36), "salt", salt, SKY)
+	var settings_face := press_tile(HOME_SETTINGS, PANEL, STEEL)
+	pixel_sprite("gear", settings_face.get_center(), 3, CREAM)
+	# Daily first win.
+	var card := Rect2(12, 76, 176, 56)
+	tile(card, PANEL, STEEL)
+	words("每日首胜", card.position + Vector2(12, 24), 17, CREAM)
+	var pending := meta.first_win_available()
+	words("奖励 ×2" if pending else "今日已完成", card.position + Vector2(12, 46), 15, GOLD if pending else MINT)
+	if meta.offline_pending > 0:
+		var claim := press_tile(HOME_OFFLINE, GOLD, GOLD)
+		pixel_sprite("iron", claim.position + Vector2(24, 22), 2)
+		words("离线收益 +%d" % meta.offline_pending, claim.position + Vector2(46, 29), 17, INK)
+	var perks := press_tile(HOME_PERKS, CREAM, CREAM)
+	words("福利", perks.get_center() + Vector2(0, 7), 18, INK, true)
+	if meta.has_rewards():
+		red_dot(perks.position + Vector2(perks.size.x - 2, 2))
+	# Sea selector.
+	var stage := press_tile(HOME_STAGE, Color(INK, 0.9), GOLD)
+	var label := "第 %d 海域 · %s  ▸" % [sector + 1, SEA_NAMES[sector]]
+	if clock < chart_notice_time:
+		label = "通关盐雾海沟后解锁"
+	words(label, stage.get_center() + Vector2(0, 7), 18, GOLD, true)
+	# Launch: the biggest thing on screen, breathing.
+	var swell := 0.0 if reduced_fx else (0.5 + 0.5 * sin(clock * 4.5)) * 5
+	var launch := press_tile(LAUNCH.grow(swell), CORAL, CORAL)
+	words("出  航", launch.get_center() + Vector2(0, 15), 42, CREAM, true)
+	draw_tabs(2)
+	if ship_slide > 0:
+		draw_ship_drawer()
+
+func draw_pill(rect: Rect2, sprite: String, count: int, color: Color) -> void:
+	tile_solid(rect, Color(INK, 0.85))
+	pixel_sprite(sprite, rect.position + Vector2(20, rect.size.y * 0.5), 2)
+	words(str(count), Vector2(rect.end.x - 12, rect.get_center().y + 8), 20, color, false, true)
+
+func red_dot(center: Vector2) -> void:
+	draw_circle(center, 9, INK, true, -1, true)
+	draw_circle(center, 7, CORAL, true, -1, true)
+
+func draw_tabs(active: int) -> void:
+	draw_rect(Rect2(-240, TAB_TOP, 960, 420), INK)
+	draw_rect(Rect2(-240, TAB_TOP, 960, 3), STEEL)
+	var icons := ["building0", "pilot", "arrow", "scrap", "gear"]
+	for index in range(TAB_NAMES.size()):
+		var center := Vector2(48 + index * 96, TAB_TOP + 26)
+		var on := index == active
+		if on:
+			draw_rect(Rect2(center.x - 40, TAB_TOP + 3, 80, 4), GOLD)
+		pixel_sprite(icons[index], center, 3 if on else 2, Color.WHITE if on else Color(MIST, 0.8))
+		words(TAB_NAMES[index], center + Vector2(0, 32), 15, GOLD if on else MIST, true)
+		if index == 3 and meta.has_rewards():
+			red_dot(center + Vector2(18, -12))
+
+func tab_at(point: Vector2) -> int:
+	if point.y < TAB_TOP or point.y > TAB_TOP + 64:
+		return -1
+	return clampi(floori(point.x / 96.0), 0, TAB_NAMES.size() - 1)
+
+func activate_tab(index: int) -> void:
+	ship_drawer = false
+	match index:
+		0:
+			enter_dock(dock_port)
+			return
+		1:
+			mode = "home"
+			ship_drawer = true
+		2:
+			mode = "home"
+		3:
+			open_perks()
+			return
+		4:
+			open_settings()
+			return
+	play_sound(1)
+
+func press_home(point: Vector2) -> void:
+	if ship_drawer:
+		for index in range(2):
+			if ship_option_rect(index).has_point(point):
+				if index == 0 or buildings[2] > 0:
+					pilot_type = index
+					ship_drawer = false
+					save_dock()
+					play_sound(1)
+				return
+		ship_drawer = false
+		return
+	var tab := tab_at(point)
+	if tab >= 0:
+		activate_tab(tab)
+	elif LAUNCH.grow(8).has_point(point):
+		start_run()
+	elif HOME_SETTINGS.has_point(point):
+		open_settings()
+	elif HOME_PERKS.has_point(point):
+		open_perks()
+	elif HOME_OFFLINE.has_point(point) and meta.offline_pending > 0:
+		metal += meta.collect_offline()
+		save_dock()
+		sound.play_cue("coin")
+	elif HOME_STAGE.has_point(point):
+		if wins > 0:
+			sector = 1 - sector
+			save_dock()
+			play_sound(1)
+		else:
+			chart_notice_time = clock + 2.5
+	elif HOME_SHIP.has_point(point):
+		ship_drawer = true
+		play_sound(1)
+
+func open_perks() -> void:
+	meta.roll_day()
+	mode = "perks"
+	play_sound(1)
+
+func task_claim_rect(index: int) -> Rect2:
+	return Rect2(318, 452 + index * 86, 108, 50)
+
+func draw_perks() -> void:
+	shade(0.72)
+	place_interface(menu_origin())
+	tile(Rect2(24, 150, 432, 630), PANEL, STEEL)
+	words("每日福利", Vector2(240, 205), 34, CREAM, true)
+	words("七日签到", Vector2(46, 250), 19, GOLD)
+	var claimed := meta.next_sign_index() if meta.can_sign() else meta.sign_streak
+	for d in range(MetaProgress.SIGN_REWARDS.size()):
+		var box := Rect2(44 + d * 57, 262, 50, 58)
+		var today_box := meta.can_sign() and d == meta.next_sign_index()
+		var done := d < claimed
+		tile_solid(box, GOLD if today_box else (Color(MINT, 0.85) if done else INK))
+		var ink := INK if today_box or done else MIST
+		words("%d天" % (d + 1), box.position + Vector2(25, 19), 13, ink, true)
+		var reward: Array = MetaProgress.SIGN_REWARDS[d]
+		words("%d" % reward[0], box.position + Vector2(25, 39), 15, ink, true)
+		if reward[1] > 0:
+			words("+%d盐" % reward[1], box.position + Vector2(25, 54), 11, ink, true)
+	if meta.can_sign():
+		button(PERKS_SIGN, "签到领取", GOLD)
+	else:
+		var face := press_tile(PERKS_SIGN, INK, STEEL, 0.0)
+		words("今日已签到", face.get_center() + Vector2(0, 7), 19, MIST, true)
+	words("每日任务", Vector2(46, 425), 19, GOLD)
+	for i in range(MetaProgress.TASKS.size()):
+		var task: Array = MetaProgress.TASKS[i]
+		var row := Rect2(44, 440 + i * 86, 392, 74)
+		tile(row, INK, STEEL)
+		words(task[0], row.position + Vector2(14, 28), 18, CREAM)
+		var goal := int(task[2])
+		var progress := mini(meta.task_progress[i], goal)
+		var track := Rect2(row.position + Vector2(14, 44), Vector2(160, 10))
+		draw_rect(track.grow(2), Color(PANEL, interface_opacity))
+		draw_rect(Rect2(track.position, Vector2(roundf(track.size.x * progress / goal), track.size.y)), MINT)
+		words("%d/%d" % [progress, goal], Vector2(track.end.x + 10, track.end.y + 2), 14, MIST)
+		var claim := task_claim_rect(i)
+		if meta.task_claimed[i]:
+			words("已领取", claim.get_center() + Vector2(0, 7), 17, MINT, true)
+		elif meta.task_done(i):
+			button(claim, "领 +%d" % task[3], GOLD)
+		else:
+			var face := press_tile(claim, PANEL, STEEL, 0.0)
+			words("+%d" % task[3], face.get_center() + Vector2(0, 7), 17, MIST, true)
+	var close := press_tile(PERKS_CLOSE, PANEL, STEEL)
+	words("返回", close.get_center() + Vector2(0, 8), 22, CREAM, true)
+
+func press_perks(point: Vector2) -> void:
+	if PERKS_SIGN.has_point(point) and meta.can_sign():
+		var reward := meta.sign()
+		metal += int(reward[0])
+		salt += int(reward[1])
+		save_dock()
+		sound.play_cue("coin")
+		return
+	for i in range(MetaProgress.TASKS.size()):
+		if task_claim_rect(i).has_point(point):
+			var gain := meta.claim_task(i)
+			if gain > 0:
+				metal += gain
+				save_dock()
+				sound.play_cue("coin")
+			return
+	if PERKS_CLOSE.has_point(point) or tab_at(point) >= 0:
+		mode = "home"
+		play_sound(1)
+
+func chest_progress() -> float:
+	if chest_open_time < 0:
+		return 0.0
+	return clampf((result_time - chest_open_time) / 0.35, 0, 1)
+
+func press_results(point: Vector2) -> void:
+	if result_time < RESULT_REVEAL_END:
+		return
+	if chest_open_time < 0:
+		chest_open_time = result_time
+		sound.play_cue("blast")
+		sound.play_cue("coin", 1.5)
+		buzz(30)
+		return
+	if result_time - chest_open_time < 0.4:
+		return
+	var local := point - battle_layout.dialog_origin
+	if RESULT_AGAIN.has_point(local):
+		start_run()
+	elif RESULT_DONE.has_point(local):
+		mode = "home"
+		play_sound(1)
+
 func draw_results() -> void:
 	shade(0.83 * smoothstep(0.0, 0.40, result_time))
 	var reveal := smoothstep(RESULT_REVEAL_START, RESULT_REVEAL_END, result_time)
@@ -1842,13 +2055,59 @@ func draw_results() -> void:
 	var rise := 0.0 if reduced_fx else 12 * (1.0 - reveal)
 	place_interface(battle_layout.dialog_origin + Vector2(0, rise))
 	interface_opacity = reveal
-	tile(Rect2(29, 228, 422, 399), PANEL, STEEL)
-	pixel_sprite("scrap", Vector2(240, 285), 5, GOLD)
-	words("海域已守住" if mode == "win" else "船体失守", Vector2(240, 353), 38, CREAM, true)
-	words("获得资源", Vector2(240, 393), 17, MIST, true)
-	draw_dock_resource(Rect2(47, 411, 184, 61), "iron", "铁料", last_reward, GOLD)
-	draw_dock_resource(Rect2(249, 411, 184, 61), "salt", "晶盐", last_salt_reward, SKY)
-	words("击破 %d" % kills, Vector2(138, 509), 17, CREAM, true)
-	words("最高连击 %d" % best_combo, Vector2(340, 509), 17, MINT, true)
-	button(RESULT_DONE, "返回港口", MINT)
+	var won := mode == "win"
+	tile(Rect2(24, 140, 432, 600), PANEL, STEEL)
+	words("海域已守住！" if won else "船体失守", Vector2(240, 205), 40, GOLD if won else CREAM, true)
+	var note := "首领已击破"
+	if not won:
+		note = "首领只剩 %d%% 血量！" % ceili(boss_left * 100) if boss_left >= 0 \
+			else "再坚持 %d 秒就能见到首领" % ceili(seconds_to_boss)
+	words(note, Vector2(240, 240), 18, MINT if won else CORAL, true)
+	if first_win_bonus:
+		var badge := Rect2(140, 254, 200, 30)
+		tile_solid(badge, GOLD)
+		words("今日首胜 · 奖励 ×2", badge.get_center() + Vector2(0, 6), 15, INK, true)
+	var opened := chest_progress()
+	draw_chest(Vector2(240, 380), chest_tier, opened)
+	if opened <= 0:
+		var pulse := 0 if reduced_fx else roundi(2 * sin(clock * 6))
+		words("点击开启宝箱", Vector2(240, 490), 22 + pulse, CREAM, true)
+	else:
+		interface_opacity = reveal * opened
+		draw_dock_resource(Rect2(47, 462, 184, 56), "iron", "铁料", last_reward + chest_metal, GOLD)
+		draw_dock_resource(Rect2(249, 462, 184, 56), "salt", "晶盐", chest_salt, SKY)
+		words("击破 %d" % kills, Vector2(138, 556), 18, CREAM, true)
+		words("最高连击 %d" % best_combo, Vector2(340, 556), 18, MINT, true)
+		button(RESULT_AGAIN, "再来一局", CORAL)
+		var home := press_tile(RESULT_DONE, PANEL, STEEL)
+		words("返回主页", home.get_center() + Vector2(0, 7), 20, CREAM, true)
 	interface_opacity = 1.0
+
+func draw_chest(center: Vector2, tier: int, opened: float) -> void:
+	var body_color: Color = [Color("#b0703a"), Color("#c9d2ea"), GOLD][tier]
+	var trim: Color = [Color("#6d3f1d"), STEEL, PEACH][tier]
+	if opened <= 0 and not reduced_fx and fmod(clock, 1.2) < 0.3:
+		center.x += roundf(sin(clock * 60) * 3)
+	if opened > 0:
+		for ray in range(12):
+			var direction := Vector2.from_angle(TAU * ray / 12 + clock * 0.6)
+			draw_line(center + Vector2(0, -20), center + Vector2(0, -20) + direction * 92 * opened,
+				Color(1.0, 0.93, 0.55, 0.55 * interface_opacity), 14)
+		for coin in range(8):
+			var arc := Vector2.from_angle(-PI * (0.15 + 0.7 * coin / 7.0))
+			var point := center + Vector2(0, -30) + arc * 110 * opened + Vector2(0, 60 * opened * opened)
+			pixel_sprite("scrap", point, 3)
+	var body := Rect2(center + Vector2(-64, -8), Vector2(128, 74))
+	draw_rect(body.grow(4), Color(INK, interface_opacity))
+	draw_rect(body, Color(body_color, interface_opacity))
+	for x in [-42, 32]:
+		draw_rect(Rect2(center + Vector2(x, -8), Vector2(10, 74)), Color(trim, interface_opacity))
+	var lift := Vector2(0, -36 * opened)
+	var lid := Rect2(center + Vector2(-68, -46) + lift, Vector2(136, 40))
+	draw_rect(lid.grow(4), Color(INK, interface_opacity))
+	draw_rect(lid, Color(body_color.lightened(0.15), interface_opacity))
+	draw_rect(Rect2(lid.position + Vector2(0, lid.size.y - 8), Vector2(lid.size.x, 8)), Color(trim, interface_opacity))
+	if opened <= 0:
+		var lock := Rect2(center + Vector2(-10, -14), Vector2(20, 22))
+		draw_rect(lock.grow(3), Color(INK, interface_opacity))
+		draw_rect(lock, Color(GOLD if tier < 2 else CORAL, interface_opacity))
